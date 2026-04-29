@@ -1,30 +1,47 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { getPreferredTheme, setTheme, type ThemeMode } from '../lib/theme'
-
-const BUTTON_CLASS_NAME =
-  'rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
 
 export default function ThemeToggle() {
   const [theme, setThemeState] = useState<ThemeMode>('dark')
+  const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
     setThemeState(getPreferredTheme())
+    setMounted(true)
   }, [])
 
   const nextTheme: ThemeMode = theme === 'dark' ? 'light' : 'dark'
+  const switchLabel = theme === 'dark' ? '切换到白天模式' : '切换到夜间模式'
 
-  return (
+  if (!mounted) return null
+
+  return createPortal(
     <button
       type="button"
       onClick={() => {
         setTheme(nextTheme)
         setThemeState(nextTheme)
       }}
-      className={BUTTON_CLASS_NAME}
-      title={theme === 'dark' ? '切换到白天模式' : '切换到夜间模式'}
-      aria-label={theme === 'dark' ? '切换到白天模式' : '切换到夜间模式'}
+      className="fixed bottom-5 right-5 z-[90] flex h-12 w-12 items-center justify-center rounded-full border border-gray-200/80 bg-white/92 text-amber-500 shadow-[0_12px_35px_rgba(15,23,42,0.14)] backdrop-blur transition-all duration-200 hover:-translate-y-0.5 hover:bg-white dark:border-white/[0.08] dark:bg-gray-900/92 dark:text-sky-300 dark:shadow-[0_12px_35px_rgba(2,6,23,0.45)] dark:hover:bg-gray-900 sm:bottom-6 sm:right-6"
+      title={switchLabel}
+      aria-label={switchLabel}
     >
-      {theme === 'dark' ? '白天' : '黑夜'}
-    </button>
+      {theme === 'dark' ? (
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+          <circle cx="12" cy="12" r="4" />
+          <path
+            strokeLinecap="round"
+            d="M12 2.5v2.25M12 19.25v2.25M4.93 4.93l1.6 1.6M17.47 17.47l1.6 1.6M2.5 12h2.25M19.25 12h2.25M4.93 19.07l1.6-1.6M17.47 6.53l1.6-1.6"
+          />
+        </svg>
+      ) : (
+        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M20.742 13.045a8.088 8.088 0 01-9.787-9.787 1 1 0 00-1.278-1.201A10 10 0 1021.943 14.323a1 1 0 00-1.201-1.278z" />
+        </svg>
+      )}
+      <span className="sr-only">{switchLabel}</span>
+    </button>,
+    document.body,
   )
 }

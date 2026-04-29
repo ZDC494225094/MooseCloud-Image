@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Select from '../components/Select'
 import ThemeToggle from '../components/ThemeToggle'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { getStoredGalleryFavoriteIds, saveGalleryFavoriteIds } from './galleryFavorites'
 import GalleryImageLightbox from './GalleryImageLightbox'
 
 interface PromptVariant {
@@ -58,6 +59,10 @@ const INITIAL_VISIBLE_CASES = 24
 const LOAD_MORE_BATCH_SIZE = 18
 const NAV_BUTTON_CLASS_NAME =
   'rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
+const ACTIVE_FAVORITE_BUTTON_CLASS_NAME =
+  'border-yellow-400 bg-yellow-50 text-yellow-500 dark:bg-yellow-500/10 dark:text-yellow-400'
+const INACTIVE_FAVORITE_BUTTON_CLASS_NAME =
+  'border-gray-200 bg-white text-gray-400 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
 
 const CATEGORY_LABELS: Record<string, string> = {
   'Ad Creative Cases': '广告创意案例',
@@ -257,9 +262,13 @@ function DetailMeta({
 function GalleryCaseModal({
   item,
   onClose,
+  isFavorite,
+  onToggleFavorite,
 }: {
   item: GalleryCase | null
   onClose: () => void
+  isFavorite: boolean
+  onToggleFavorite: (caseId: string) => void
 }) {
   const [imageIndex, setImageIndex] = useState(0)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
@@ -321,6 +330,22 @@ function GalleryCaseModal({
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              <button
+                onClick={() => onToggleFavorite(item.id)}
+                className={`rounded-xl border px-3 py-2 text-sm transition-colors ${
+                  isFavorite
+                    ? ACTIVE_FAVORITE_BUTTON_CLASS_NAME
+                    : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-white/[0.06]'
+                }`}
+                title={isFavorite ? '取消收藏' : '收藏案例'}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <svg className="h-4 w-4" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                  </svg>
+                  {isFavorite ? '已收藏' : '收藏'}
+                </span>
+              </button>
               <a
                 href={buildPlaygroundHref(item.prompt)}
                 className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
@@ -536,11 +561,20 @@ export default function GalleryApp() {
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('all')
+  const [favoriteOnly, setFavoriteOnly] = useState(false)
   const [sortMode, setSortMode] = useState<SortMode>('latest')
   const [activeCase, setActiveCase] = useState<GalleryCase | null>(null)
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => getStoredGalleryFavoriteIds())
+  const [batchStart, setBatchStart] = useState(0)
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_CASES)
   const [showLoadMore, setShowLoadMore] = useState(false)
   const loadMoreTriggerRef = useRef<HTMLDivElement | null>(null)
+
+  const favoriteIdSet = useMemo(() => new Set(favoriteIds), [favoriteIds])
+
+  useEffect(() => {
+    saveGalleryFavoriteIds(favoriteIds)
+  }, [favoriteIds])
 
   useEffect(() => {
     let alive = true
@@ -579,12 +613,21 @@ export default function GalleryApp() {
     ]
   }, [payload])
 
+  const toggleFavorite = (caseId: string) => {
+    setFavoriteIds((current) =>
+      current.includes(caseId)
+        ? current.filter((value) => value !== caseId)
+        : [...current, caseId],
+    )
+  }
+
   const filteredCases = useMemo(() => {
     if (!payload) return []
 
     const normalizedQuery = query.trim().toLowerCase()
     const list = payload.cases.filter((item) => {
       if (category !== 'all' && item.category !== category) return false
+      if (favoriteOnly && !favoriteIdSet.has(item.id)) return false
       if (!normalizedQuery) return true
 
       const haystack = [
@@ -615,19 +658,32 @@ export default function GalleryApp() {
       default:
         return [...list].sort((left, right) => right.sortValue - left.sortValue)
     }
-  }, [payload, query, category, sortMode])
+  }, [payload, query, category, favoriteOnly, favoriteIdSet, sortMode])
 
   useEffect(() => {
+    setBatchStart(0)
     setVisibleCount(INITIAL_VISIBLE_CASES)
     setShowLoadMore(false)
-  }, [query, category, sortMode])
+  }, [query, category, favoriteOnly, sortMode])
 
   const visibleCases = useMemo(
-    () => filteredCases.slice(0, visibleCount),
-    [filteredCases, visibleCount],
+    () => filteredCases.slice(batchStart, batchStart + visibleCount),
+    [filteredCases, batchStart, visibleCount],
   )
 
-  const hasMoreCases = visibleCount < filteredCases.length
+  const hasMoreCases = batchStart + visibleCount < filteredCases.length
+  const hasMultipleBatches = filteredCases.length > INITIAL_VISIBLE_CASES
+
+  const handleRefreshBatch = () => {
+    if (!hasMultipleBatches) return
+
+    setBatchStart((current) => {
+      const nextStart = current + INITIAL_VISIBLE_CASES
+      return nextStart >= filteredCases.length ? 0 : nextStart
+    })
+    setVisibleCount(INITIAL_VISIBLE_CASES)
+    setShowLoadMore(false)
+  }
 
   useEffect(() => {
     if (!hasMoreCases) {
@@ -690,7 +746,6 @@ export default function GalleryApp() {
             >
               主站
             </a>
-            <ThemeToggle />
             <a
               href="./playground.html"
               className={NAV_BUTTON_CLASS_NAME}
@@ -700,6 +755,7 @@ export default function GalleryApp() {
           </nav>
         </div>
       </header>
+      <ThemeToggle />
 
       <main className="pb-16">
         <div className="safe-area-x mx-auto max-w-7xl">
@@ -776,6 +832,31 @@ export default function GalleryApp() {
                 />
               </div>
 
+              <button
+                onClick={() => setFavoriteOnly((value) => !value)}
+                className={`z-20 inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm transition md:w-auto ${
+                  favoriteOnly ? ACTIVE_FAVORITE_BUTTON_CLASS_NAME : INACTIVE_FAVORITE_BUTTON_CLASS_NAME
+                }`}
+                title={favoriteOnly ? '取消只看收藏' : '只看收藏'}
+              >
+                <svg className="h-4 w-4" fill={favoriteOnly ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                </svg>
+                只看收藏
+              </button>
+
+              <button
+                onClick={handleRefreshBatch}
+                disabled={!hasMultipleBatches}
+                className="z-20 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-white/[0.06] md:w-auto"
+                title="换一批"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                换一批
+              </button>
+
               <div className="z-20 w-full md:w-44">
                 <Select
                   value={sortMode}
@@ -825,9 +906,10 @@ export default function GalleryApp() {
                 <div className="columns-1 gap-4 md:columns-2 xl:columns-3">
                 {visibleCases.map((item) => {
                   const previewImage = item.coverImage || item.images[0]
+                  const isFavorite = favoriteIdSet.has(item.id)
 
                   return (
-                    <article key={item.id} className="mb-4 break-inside-avoid">
+                    <article key={item.id} className="relative mb-4 break-inside-avoid">
                       <button
                         onClick={() => setActiveCase(item)}
                         className="block w-full overflow-hidden rounded-3xl border border-gray-200 bg-white text-left shadow-sm transition-[transform,box-shadow,border-color] hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:border-white/[0.18]"
@@ -846,6 +928,23 @@ export default function GalleryApp() {
                             {item.title}
                           </div>
                         )}
+                      </button>
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          toggleFavorite(item.id)
+                        }}
+                        className={`absolute right-3 top-3 inline-flex h-10 w-10 items-center justify-center rounded-full border backdrop-blur transition ${
+                          isFavorite
+                            ? 'border-yellow-400/70 bg-yellow-400 text-white shadow-[0_10px_24px_rgba(250,204,21,0.35)]'
+                            : 'border-white/20 bg-black/35 text-white hover:bg-black/50'
+                        }`}
+                        title={isFavorite ? '取消收藏' : '收藏案例'}
+                        aria-label={isFavorite ? '取消收藏' : '收藏案例'}
+                      >
+                        <svg className="h-4 w-4" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                        </svg>
                       </button>
                     </article>
                   )
@@ -877,7 +976,12 @@ export default function GalleryApp() {
         </div>
       </main>
 
-      <GalleryCaseModal item={activeCase} onClose={() => setActiveCase(null)} />
+      <GalleryCaseModal
+        item={activeCase}
+        onClose={() => setActiveCase(null)}
+        isFavorite={activeCase ? favoriteIdSet.has(activeCase.id) : false}
+        onToggleFavorite={toggleFavorite}
+      />
     </>
   )
 }
