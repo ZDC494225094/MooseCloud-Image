@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.tmp-sync-downloads/
+.upstream_playground/
+*.log
+.server.out.log
+.server.err.log
+.tmp_gpt_image_playground.zip
