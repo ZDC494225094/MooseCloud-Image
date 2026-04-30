@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useStore, getCachedImage, ensureImageCached } from '../store'
+import { useStore, getCachedImage, ensureOriginalImageSrc } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 
@@ -30,11 +30,11 @@ export default function Lightbox() {
       setSrc('')
       return
     }
-    const cached = getCachedImage(lightboxImageId)
+    const cached = getCachedImage(lightboxImageId, 'full', false)
     if (cached) {
       setSrc(cached)
     } else {
-      ensureImageCached(lightboxImageId).then((url) => {
+      ensureOriginalImageSrc(lightboxImageId).then((url) => {
         if (url) setSrc(url)
       })
     }
@@ -54,11 +54,11 @@ export default function Lightbox() {
 
     const taskWithMask = tasks.find((t) => t.maskTargetImageId === lightboxImageId && t.maskImageId)
     if (taskWithMask?.maskImageId) {
-      const cached = getCachedImage(taskWithMask.maskImageId)
+      const cached = getCachedImage(taskWithMask.maskImageId, 'full', false)
       if (cached) {
         setMaskImageSrc(cached)
       } else {
-        ensureImageCached(taskWithMask.maskImageId).then((url) => {
+        ensureOriginalImageSrc(taskWithMask.maskImageId).then((url) => {
           if (url) setMaskImageSrc(url)
         })
       }

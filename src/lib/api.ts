@@ -68,17 +68,49 @@ async function blobToDataUrl(blob: Blob, fallbackMime: string): Promise<string> 
   return `data:${blob.type || fallbackMime};base64,${btoa(binary)}`
 }
 
-async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal: AbortSignal): Promise<string> {
-  const response = await fetch(url, {
-    cache: 'no-store',
-    signal,
-  })
+function createTimeoutController(timeoutSeconds: number): {
+  controller: AbortController
+  timeoutId: ReturnType<typeof setTimeout>
+} {
+  const controller = new AbortController()
+  const timeoutMs = Math.max(1, timeoutSeconds) * 1000
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  return { controller, timeoutId }
+}
 
-  if (!response.ok) {
-    throw new Error(`图片 URL 下载失败：HTTP ${response.status}`)
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException
+      ? error.name === 'AbortError'
+      : typeof error === 'object' &&
+        error !== null &&
+        'name' in error &&
+        (error as { name?: unknown }).name === 'AbortError'
+  )
+}
+
+async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, timeoutSeconds: number): Promise<string> {
+  const { controller, timeoutId } = createTimeoutController(timeoutSeconds)
+
+  try {
+    const response = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      throw new Error(`图片 URL 下载失败：HTTP ${response.status}`)
+    }
+
+    return blobToDataUrl(await response.blob(), fallbackMime)
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error('图片 URL 下载超时')
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
   }
-
-  return blobToDataUrl(await response.blob(), fallbackMime)
 }
 
 async function getApiErrorMessage(response: Response): Promise<string> {
@@ -187,6 +219,11 @@ export interface CallApiOptions {
   /** 输入图片的 data URL 列表 */
   inputImageDataUrls: string[]
   maskDataUrl?: string
+  onImage?: (result: {
+    image: string
+    actualParams?: Partial<TaskParams>
+    revisedPrompt?: string
+  }) => void | Promise<void>
 }
 
 export interface CallApiResult {
@@ -200,29 +237,73 @@ export interface CallApiResult {
   revisedPrompts?: Array<string | undefined>
 }
 
-function parseResponsesImageResults(payload: ResponsesApiResponse, fallbackMime: string): Array<{
+async function emitPartialResults(opts: CallApiOptions, result: CallApiResult): Promise<void> {
+  if (!opts.onImage) return
+
+  for (let index = 0; index < result.images.length; index += 1) {
+    await opts.onImage({
+      image: result.images[index],
+      actualParams: result.actualParamsList?.[index] ?? result.actualParams,
+      revisedPrompt: result.revisedPrompts?.[index],
+    })
+  }
+}
+
+function pickResponseResultValue(result: unknown): string | undefined {
+  if (typeof result === 'string' && result.trim()) {
+    return result.trim()
+  }
+
+  if (!result || typeof result !== 'object') {
+    return undefined
+  }
+
+  const record = result as Record<string, unknown>
+  for (const key of ['b64_json', 'image', 'data'] as const) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+
+  return undefined
+}
+
+async function resolveResponseResultImage(
+  value: string,
+  fallbackMime: string,
+): Promise<string> {
+  if (isHttpUrl(value)) {
+    return value
+  }
+
+  return normalizeBase64Image(value, fallbackMime)
+}
+
+async function parseResponsesImageResults(payload: ResponsesApiResponse, fallbackMime: string): Promise<Array<{
   image: string
   actualParams?: Partial<TaskParams>
   revisedPrompt?: string
-}> {
+}>> {
   const output = payload.output
   if (!Array.isArray(output) || !output.length) {
     throw new Error('接口未返回图片数据')
   }
 
+  const toolActualParams = payload.tools?.find((tool) => tool?.type === 'image_generation')
   const results: Array<{ image: string; actualParams?: Partial<TaskParams>; revisedPrompt?: string }> = []
 
   for (const item of output) {
     if (item?.type !== 'image_generation_call') continue
 
-    const result = item.result
-    if (typeof result === 'string' && result.trim()) {
-      results.push({
-        image: normalizeBase64Image(result, fallbackMime),
-        actualParams: mergeActualParams(pickActualParams(item)),
-        revisedPrompt: typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined,
-      })
-    }
+    const imageValue = pickResponseResultValue(item.result)
+    if (!imageValue) continue
+
+    results.push({
+      image: await resolveResponseResultImage(imageValue, fallbackMime),
+      actualParams: mergeActualParams(pickActualParams(toolActualParams), pickActualParams(item)),
+      revisedPrompt: typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined,
+    })
   }
 
   if (!results.length) {
@@ -274,7 +355,11 @@ async function callImagesApi(opts: CallApiOptions): Promise<CallApiResult> {
 async function callImagesApiConcurrent(opts: CallApiOptions, n: number): Promise<CallApiResult> {
   const singleOpts = { ...opts, params: { ...opts.params, n: 1, quality: 'auto' as const } }
   const results = await Promise.allSettled(
-    Array.from({ length: n }).map(() => callImagesApiSingle(singleOpts)),
+    Array.from({ length: n }).map(async () => {
+      const result = await callImagesApiSingle(singleOpts)
+      await emitPartialResults(opts, result)
+      return result
+    }),
   )
 
   const successfulResults = results
@@ -313,8 +398,7 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
   const useApiProxy = settings.apiProxy && isApiProxyAvailable(proxyConfig)
   const requestHeaders = createRequestHeaders(settings)
 
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
+  const { controller, timeoutId } = createTimeoutController(settings.timeout)
 
   try {
     let response: Response
@@ -430,7 +514,7 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
       }
 
       if (isHttpUrl(item.url)) {
-        images.push(await fetchImageUrlAsDataUrl(item.url, mime, controller.signal))
+        images.push(item.url)
         revisedPrompts.push(typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined)
       }
     }
@@ -459,7 +543,11 @@ async function callResponsesImageApi(opts: CallApiOptions): Promise<CallApiResul
     return callResponsesImageApiSingle(opts)
   }
 
-  const promises = Array.from({ length: n }).map(() => callResponsesImageApiSingle(opts))
+  const promises = Array.from({ length: n }).map(async () => {
+    const result = await callResponsesImageApiSingle(opts)
+    await emitPartialResults(opts, result)
+    return result
+  })
   const results = await Promise.allSettled(promises)
   
   const successfulResults = results
@@ -493,8 +581,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions): Promise<CallAp
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = settings.apiProxy && isApiProxyAvailable(proxyConfig)
   const requestHeaders = createRequestHeaders(settings)
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
+  const { controller, timeoutId } = createTimeoutController(settings.timeout)
 
   try {
     if (opts.maskDataUrl) {
@@ -533,7 +620,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions): Promise<CallAp
     if (payloadError && (!Array.isArray(payload.output) || payload.output.length === 0)) {
       throw new Error(payloadError)
     }
-    const imageResults = parseResponsesImageResults(payload, mime)
+    const imageResults = await parseResponsesImageResults(payload, mime)
     const actualParams = mergeActualParams(
       imageResults[0]?.actualParams ?? {},
     )

@@ -12,7 +12,7 @@ export interface AppSettings {
   apiProxy: boolean
 }
 
-const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://moosecloud.cc/v1'
+const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://img.moosecloud.cc/v1'
 export const DEFAULT_IMAGES_MODEL = 'gpt-image-2'
 export const DEFAULT_RESPONSES_MODEL = 'gpt-5.5'
 
@@ -64,6 +64,7 @@ export interface MaskDraft {
 // ===== 任务记录 =====
 
 export type TaskStatus = 'running' | 'done' | 'error'
+export type TaskExecutionState = 'queued' | 'processing'
 
 export interface TaskRecord {
   id: string
@@ -82,8 +83,13 @@ export interface TaskRecord {
   /** 输出图片的 image store id 列表 */
   outputImages: string[]
   status: TaskStatus
+  executionState?: TaskExecutionState
+  requestedCount?: number
+  completedCount?: number
+  failedCount?: number
   error: string | null
   createdAt: number
+  startedAt?: number | null
   finishedAt: number | null
   /** 总耗时毫秒 */
   elapsed: number | null
@@ -95,7 +101,14 @@ export interface TaskRecord {
 
 export interface StoredImage {
   id: string
-  dataUrl: string
+  blob?: Blob
+  previewBlob?: Blob
+  width?: number
+  height?: number
+  src?: string
+  srcKind?: 'dataUrl' | 'url'
+  dataUrl?: string
+  mimeType?: string
   /** 图片首次存储时间（ms） */
   createdAt?: number
   /** 图片来源：用户上传 / API 生成 / 遮罩 */

@@ -1,5 +1,17 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
-import { useStore, getCachedImage, ensureImageCached, reuseConfig, editOutputs, removeTask, updateTaskInStore, showCodexCliPrompt, getCodexCliPromptKey, retryTask } from '../store'
+import {
+  useStore,
+  getCachedImage,
+  ensureOriginalImageSrc,
+  ensureImageMetadata,
+  reuseConfig,
+  editOutputs,
+  removeTask,
+  updateTaskInStore,
+  showCodexCliPrompt,
+  getCodexCliPromptKey,
+  retryTask,
+} from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { formatImageRatio } from '../lib/size'
 import { ActualValueBadge, DetailParamValue } from '../lib/paramDisplay'
@@ -34,7 +46,6 @@ export default function DetailModal() {
 
   useCloseOnEscape(Boolean(task), () => setDetailTaskId(null))
 
-  // Reset index when task changes
   useEffect(() => {
     setImageIndex(0)
   }, [detailTaskId])
@@ -45,7 +56,6 @@ export default function DetailModal() {
     return () => window.clearInterval(id)
   }, [task?.status])
 
-  // 加载所有相关图片
   useEffect(() => {
     if (!task) {
       setImageSrcs({})
@@ -60,14 +70,31 @@ export default function DetailModal() {
     ])]
     const initial: Record<string, string> = {}
     for (const id of ids) {
-      const cached = getCachedImage(id)
+      const cached = getCachedImage(id, 'full', false)
       if (cached) initial[id] = cached
     }
     setImageSrcs(initial)
     for (const id of ids) {
       if (initial[id]) continue
-      ensureImageCached(id).then((url) => {
+      ensureOriginalImageSrc(id).then((url) => {
         if (!cancelled && url) setImageSrcs((prev) => ({ ...prev, [id]: url }))
+      })
+    }
+
+    for (const id of task.outputImages || []) {
+      ensureImageMetadata(id).then((meta) => {
+        if (!cancelled && meta?.width && meta?.height) {
+          const width = meta.width
+          const height = meta.height
+          setImageRatios((prev) => ({
+            ...prev,
+            [id]: formatImageRatio(width, height),
+          }))
+          setImageSizes((prev) => ({
+            ...prev,
+            [id]: `${width} x ${height}`,
+          }))
+        }
       })
     }
 
@@ -96,7 +123,7 @@ export default function DetailModal() {
         }))
         setImageSizes((prev) => ({
           ...prev,
-          [currentOutputImageId]: `${image.naturalWidth}×${image.naturalHeight}`,
+          [currentOutputImageId]: `${image.naturalWidth} x ${image.naturalHeight}`,
         }))
       }
     }
@@ -108,7 +135,7 @@ export default function DetailModal() {
       }))
       setImageSizes((prev) => ({
         ...prev,
-        [currentOutputImageId]: `${image.naturalWidth}×${image.naturalHeight}`,
+        [currentOutputImageId]: `${image.naturalWidth} x ${image.naturalHeight}`,
       }))
     }
 
@@ -163,6 +190,10 @@ export default function DetailModal() {
   const hasHandledPromptWarning = settings.codexCli || dismissedCodexCliPrompts.includes(codexCliPromptKey)
   const showPromptWarning = Boolean(currentOutputImageId && (!currentRevisedPrompt || showRevisedPrompt) && !hasHandledPromptWarning)
   const aggregateActualParams = outputLen > 0 ? { ...task.actualParams, n: outputLen } : task.actualParams
+  const requestedCount = Math.max(1, task.requestedCount ?? task.params.n ?? 1)
+  const completedCount = Math.max(outputLen, task.completedCount ?? 0)
+  const failedCount = Math.max(task.failedCount ?? 0, requestedCount - completedCount)
+  const isQueued = task.status === 'running' && task.executionState === 'queued'
 
   const formatTime = (ts: number | null) => {
     if (!ts) return ''
@@ -171,7 +202,7 @@ export default function DetailModal() {
 
   const formatDuration = () => {
     if (task.status === 'running') {
-      const seconds = Math.max(0, Math.floor((now - task.createdAt) / 1000))
+      const seconds = Math.max(0, Math.floor((now - (task.startedAt ?? task.createdAt)) / 1000))
       const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
       const ss = String(seconds % 60).padStart(2, '0')
       return `${mm}:${ss}`
@@ -283,9 +314,8 @@ export default function DetailModal() {
           </button>
         </div>
 
-        {/* 左侧：图片 */}
         <div ref={imagePanelRef} className="md:w-1/2 w-full h-64 md:h-auto bg-gray-100 dark:bg-black/20 relative flex items-center justify-center flex-shrink-0 min-h-[16rem]">
-          {task.status === 'done' && outputLen > 0 && (
+          {task.status !== 'error' && outputLen > 0 && (
             <>
               <img
                 ref={mainImageRef}
@@ -300,9 +330,7 @@ export default function DetailModal() {
                   const imageRect = image.getBoundingClientRect()
                   setImageLabelLeft(Math.max(8, imageRect.left - panelRect.left))
                 }}
-                onClick={() =>
-                  setLightboxImageId(task.outputImages[imageIndex], task.outputImages)
-                }
+                onClick={() => setLightboxImageId(task.outputImages[imageIndex], task.outputImages)}
                 alt=""
               />
               <div data-selectable-text className="absolute top-[15px] flex items-center gap-1.5" style={{ left: imageLabelLeft }}>
@@ -329,11 +357,7 @@ export default function DetailModal() {
               {outputLen > 1 && (
                 <>
                   <button
-                    onClick={() =>
-                      setImageIndex(
-                        (imageIndex - 1 + outputLen) % outputLen,
-                      )
-                    }
+                    onClick={() => setImageIndex((imageIndex - 1 + outputLen) % outputLen)}
                     className="absolute left-2 top-1/2 -translate-y-1/2 p-1.5 rounded-full bg-black/30 text-white hover:bg-black/50 transition"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -341,9 +365,7 @@ export default function DetailModal() {
                     </svg>
                   </button>
                   <button
-                    onClick={() =>
-                      setImageIndex((imageIndex + 1) % outputLen)
-                    }
+                    onClick={() => setImageIndex((imageIndex + 1) % outputLen)}
                     className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-full bg-black/30 text-white hover:bg-black/50 transition"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -355,9 +377,21 @@ export default function DetailModal() {
                   </span>
                 </>
               )}
+              {task.status === 'running' && (
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-4 pb-4 pt-10 text-white">
+                  <div className="flex items-center justify-between gap-3 text-xs">
+                    <span className="font-medium">{isQueued ? '排队中' : '生成中'}</span>
+                    <span className="font-mono">
+                      {completedCount}/{requestedCount}
+                      {failedCount > 0 ? ` · 失败 ${failedCount}` : ''}
+                    </span>
+                  </div>
+                </div>
+              )}
             </>
           )}
-          {task.status === 'running' && (
+
+          {task.status === 'running' && outputLen === 0 && (
             <>
               <div className="absolute left-4 top-4 flex items-center gap-1 bg-black/50 text-white text-xs px-2 py-0.5 rounded backdrop-blur-sm font-mono">
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -369,8 +403,12 @@ export default function DetailModal() {
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
+              <span className="absolute bottom-4 text-xs text-gray-500 dark:text-gray-400">
+                {isQueued ? '准备启动...' : '生成中，结果会自动回填'}
+              </span>
             </>
           )}
+
           {task.status === 'error' && (
             <div className="w-full max-w-md px-4 text-center">
               <svg className="w-10 h-10 text-red-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -415,7 +453,6 @@ export default function DetailModal() {
           )}
         </div>
 
-        {/* 右侧：信息 */}
         <div className="md:w-1/2 w-full p-5 overflow-y-auto flex flex-col">
           <button
             onClick={() => setDetailTaskId(null)}
@@ -470,7 +507,6 @@ export default function DetailModal() {
               </div>
             )}
 
-            {/* 参考图 */}
             {allInputImageIds.length > 0 && (
               <div className="mb-4">
                 <div className="flex items-center gap-1.5 mb-2">
@@ -490,7 +526,7 @@ export default function DetailModal() {
                 <div className="flex gap-2 flex-wrap">
                   {allInputImageIds.map((imgId) => {
                     const isMaskTarget = imgId === maskTargetId
-                    const displaySrc = (isMaskTarget && maskPreviewSrc) ? maskPreviewSrc : (imageSrcs[imgId] || '')
+                    const displaySrc = isMaskTarget && maskPreviewSrc ? maskPreviewSrc : (imageSrcs[imgId] || '')
                     return (
                       <div key={imgId} className="relative group inline-block">
                         <div
@@ -499,11 +535,7 @@ export default function DetailModal() {
                           }`}
                           onClick={() => setLightboxImageId(imgId, allInputImageIds)}
                         >
-                          <img
-                            src={displaySrc}
-                            className="w-full h-full object-cover"
-                            alt=""
-                          />
+                          <img src={displaySrc} className="w-full h-full object-cover" alt="" />
                           {isMaskTarget && (
                             <span className="absolute left-1 top-1 rounded bg-blue-500/90 px-1.5 py-0.5 text-[8px] leading-none text-white font-bold tracking-wider backdrop-blur-sm z-10 pointer-events-none">
                               MASK
@@ -517,7 +549,6 @@ export default function DetailModal() {
               </div>
             )}
 
-            {/* 参数 */}
             <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-2">
               参数配置
             </h3>
@@ -556,14 +587,12 @@ export default function DetailModal() {
               )}
             </div>
 
-            {/* 时间 */}
             <div className="text-xs text-gray-400 dark:text-gray-500 mb-4">
               <span>创建于 {formatTime(task.createdAt)}</span>
               {formatDuration() && <span> · 耗时 {formatDuration()}</span>}
             </div>
           </div>
 
-          {/* 操作按钮 */}
           <div className="grid grid-cols-4 sm:flex gap-2 pt-4 border-t border-gray-100 dark:border-white/[0.08]">
             <button
               onClick={handleReuse}

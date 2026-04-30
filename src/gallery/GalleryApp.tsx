@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import FloatingPageActions from '../components/FloatingPageActions'
 import Select from '../components/Select'
-import ThemeToggle from '../components/ThemeToggle'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { getStoredGalleryFavoriteIds, saveGalleryFavoriteIds } from './galleryFavorites'
 import GalleryImageLightbox from './GalleryImageLightbox'
@@ -561,6 +561,7 @@ export default function GalleryApp() {
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('all')
+  const [sourceFilter, setSourceFilter] = useState('all')
   const [favoriteOnly, setFavoriteOnly] = useState(false)
   const [sortMode, setSortMode] = useState<SortMode>('latest')
   const [activeCase, setActiveCase] = useState<GalleryCase | null>(null)
@@ -613,6 +614,23 @@ export default function GalleryApp() {
     ]
   }, [payload])
 
+  const sourceOptions = useMemo(() => {
+    if (!payload) return [{ label: '全部来源', value: 'all' }]
+
+    const knownSources = new Map<string, string>()
+    payload.sources?.forEach((source) => {
+      if (source.type) knownSources.set(source.type, source.label || source.type)
+    })
+    payload.cases.forEach((item) => {
+      if (item.sourceType) knownSources.set(item.sourceType, item.sourceLabel || item.sourceType)
+    })
+
+    return [
+      { label: '全部来源', value: 'all' },
+      ...Array.from(knownSources.entries()).map(([value, label]) => ({ label, value })),
+    ]
+  }, [payload])
+
   const toggleFavorite = (caseId: string) => {
     setFavoriteIds((current) =>
       current.includes(caseId)
@@ -627,6 +645,7 @@ export default function GalleryApp() {
     const normalizedQuery = query.trim().toLowerCase()
     const list = payload.cases.filter((item) => {
       if (category !== 'all' && item.category !== category) return false
+      if (sourceFilter !== 'all' && item.sourceType !== sourceFilter) return false
       if (favoriteOnly && !favoriteIdSet.has(item.id)) return false
       if (!normalizedQuery) return true
 
@@ -658,13 +677,13 @@ export default function GalleryApp() {
       default:
         return [...list].sort((left, right) => right.sortValue - left.sortValue)
     }
-  }, [payload, query, category, favoriteOnly, favoriteIdSet, sortMode])
+  }, [payload, query, category, sourceFilter, favoriteOnly, favoriteIdSet, sortMode])
 
   useEffect(() => {
     setBatchStart(0)
     setVisibleCount(INITIAL_VISIBLE_CASES)
     setShowLoadMore(false)
-  }, [query, category, favoriteOnly, sortMode])
+  }, [query, category, sourceFilter, favoriteOnly, sortMode])
 
   const visibleCases = useMemo(
     () => filteredCases.slice(batchStart, batchStart + visibleCount),
@@ -739,14 +758,6 @@ export default function GalleryApp() {
           </div>
           <nav className="flex shrink-0 items-center gap-2">
             <a
-              href="https://moosecloud.cc"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={NAV_BUTTON_CLASS_NAME}
-            >
-              主站
-            </a>
-            <a
               href="./playground.html"
               className={NAV_BUTTON_CLASS_NAME}
             >
@@ -755,7 +766,7 @@ export default function GalleryApp() {
           </nav>
         </div>
       </header>
-      <ThemeToggle />
+      <FloatingPageActions />
 
       <main className="pb-16">
         <div className="safe-area-x mx-auto max-w-7xl">
@@ -828,6 +839,15 @@ export default function GalleryApp() {
                   value={category}
                   onChange={(value) => setCategory(String(value))}
                   options={categories}
+                  className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm transition hover:bg-gray-50 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]"
+                />
+              </div>
+
+              <div className="z-20 w-full md:w-52">
+                <Select
+                  value={sourceFilter}
+                  onChange={(value) => setSourceFilter(String(value))}
+                  options={sourceOptions}
                   className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm transition hover:bg-gray-50 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]"
                 />
               </div>

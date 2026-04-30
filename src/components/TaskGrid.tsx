@@ -3,6 +3,7 @@ import { useStore, reuseConfig, editOutputs, removeTask } from '../store'
 import TaskCard from './TaskCard'
 
 export default function TaskGrid() {
+  const PAGE_SIZE = 12
   const tasks = useStore((s) => s.tasks)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
@@ -14,6 +15,7 @@ export default function TaskGrid() {
   const clearSelection = useStore((s) => s.clearSelection)
   const rootRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
+  const [currentPage, setCurrentPage] = useState(1)
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null)
   const isDragging = useRef(false)
   const dragStart = useRef<{ x: number; y: number } | null>(null)
@@ -27,18 +29,29 @@ export default function TaskGrid() {
   const filteredTasks = useMemo(() => {
     const sorted = [...tasks].sort((a, b) => b.createdAt - a.createdAt)
     const q = searchQuery.trim().toLowerCase()
-    
+
     return sorted.filter((t) => {
       if (filterFavorite && !t.isFavorite) return false
       const matchStatus = filterStatus === 'all' || t.status === filterStatus
       if (!matchStatus) return false
-      
+
       if (!q) return true
       const prompt = (t.prompt || '').toLowerCase()
       const paramStr = JSON.stringify(t.params).toLowerCase()
       return prompt.includes(q) || paramStr.includes(q)
     })
   }, [tasks, searchQuery, filterStatus, filterFavorite])
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, filterStatus, filterFavorite, tasks.length])
+
+  const totalPages = Math.max(1, Math.ceil(filteredTasks.length / PAGE_SIZE))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const visibleTasks = useMemo(() => {
+    const start = (safeCurrentPage - 1) * PAGE_SIZE
+    return filteredTasks.slice(start, start + PAGE_SIZE)
+  }, [filteredTasks, safeCurrentPage])
 
   const handleDelete = (task: typeof tasks[0]) => {
     setConfirmDialog({
@@ -192,14 +205,53 @@ export default function TaskGrid() {
     )
   }
 
+  const renderPagination = () => (
+    <div className="flex flex-col items-center gap-3">
+      <div className="text-xs text-gray-500 dark:text-gray-400">
+        第 {safeCurrentPage} / {totalPages} 页，共 {filteredTasks.length} 条
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+          disabled={safeCurrentPage <= 1}
+          className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm text-gray-600 shadow-sm transition hover:border-gray-300 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-300 dark:hover:border-white/[0.18] dark:hover:text-white"
+        >
+          上一页
+        </button>
+        <button
+          type="button"
+          onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+          disabled={safeCurrentPage >= totalPages}
+          className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm text-gray-600 shadow-sm transition hover:border-gray-300 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-300 dark:hover:border-white/[0.18] dark:hover:text-white"
+        >
+          下一页
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={() => setCurrentPage(1)}
+        className="text-xs text-gray-500 underline-offset-2 transition hover:text-gray-800 hover:underline dark:text-gray-400 dark:hover:text-gray-200"
+      >
+        回到第一页
+      </button>
+    </div>
+  )
+
   return (
-    <div 
+    <div
       ref={rootRef}
       data-task-grid-root
       className="relative min-h-[50vh]"
     >
-      <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pb-10">
-        {filteredTasks.map((task) => (
+      {filteredTasks.length > PAGE_SIZE && (
+        <div className="mb-4">
+          {renderPagination()}
+        </div>
+      )}
+
+      <div ref={gridRef} className="grid grid-cols-1 gap-4 pb-10 sm:grid-cols-2 lg:grid-cols-3">
+        {visibleTasks.map((task) => (
           <div key={task.id} className="task-card-wrapper" data-task-id={task.id}>
             <TaskCard
               task={task}
@@ -227,9 +279,16 @@ export default function TaskGrid() {
           </div>
         ))}
       </div>
+
+      {filteredTasks.length > PAGE_SIZE && (
+        <div className="pb-10">
+          {renderPagination()}
+        </div>
+      )}
+
       {selectionBox && (
         <div
-          className="fixed bg-blue-500/20 border border-blue-500/50 pointer-events-none z-[30]"
+          className="fixed z-[30] border border-blue-500/50 bg-blue-500/20 pointer-events-none"
           style={{
             left: Math.min(selectionBox.startX, selectionBox.currentX),
             top: Math.min(selectionBox.startY, selectionBox.currentY),

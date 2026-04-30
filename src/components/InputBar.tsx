@@ -127,6 +127,7 @@ export default function InputBar() {
   const [imageDragIndex, setImageDragIndex] = useState<number | null>(null)
   const [imageDragOverIndex, setImageDragOverIndex] = useState<number | null>(null)
   const [touchDragPreview, setTouchDragPreview] = useState<{ src: string; x: number; y: number } | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
   const handleRef = useRef<HTMLDivElement>(null)
   const dragTouchRef = useRef({ startY: 0, moved: false })
   const imageDragIndexRef = useRef<number | null>(null)
@@ -146,7 +147,6 @@ export default function InputBar() {
   const dragCounter = useRef(0)
   const isMobile = useIsMobile()
 
-  const canSubmit = prompt.trim() && settings.apiKey
   const atImageLimit = inputImages.length >= API_MAX_IMAGES
   const maskTargetImage = maskDraft
     ? inputImages.find((img) => img.id === maskDraft.targetImageId) ?? null
@@ -154,6 +154,26 @@ export default function InputBar() {
   const referenceImages = maskTargetImage
     ? inputImages.filter((img) => img.id !== maskTargetImage.id)
     : inputImages
+  const runningTaskCount = useMemo(
+    () => tasks.filter((task) => task.status === 'running').length,
+    [tasks],
+  )
+  const hasRunningTasks = runningTaskCount > 0
+  const requestedImageCount = useMemo(() => {
+    const parsedValue = Number(nInput)
+    if (Number.isNaN(parsedValue)) return params.n
+    return Math.min(4, Math.max(1, Math.trunc(parsedValue)))
+  }, [nInput, params.n])
+  const submitHint = !settings.apiKey
+    ? '尚未完成 API 配置，请在右上角设置中进行'
+    : !prompt.trim()
+      ? '请输入提示词后再提交'
+      : isSubmitting
+        ? '正在提交任务，请稍候'
+        : hasRunningTasks
+          ? `当前有 ${runningTaskCount} 个任务正在进行，新任务会立即独立发起生成请求，不会等待其他任务完成`
+          : ''
+  const canSubmit = Boolean(prompt.trim() && settings.apiKey && !isSubmitting)
 
   useEffect(() => {
     setOutputCompressionInput(
@@ -232,10 +252,44 @@ export default function InputBar() {
   const commitN = useCallback(() => {
     const nextValue = Number(nInput)
     const normalizedValue =
-      nInput.trim() === '' ? DEFAULT_PARAMS.n : Number.isNaN(nextValue) ? params.n : nextValue
+      nInput.trim() === ''
+        ? DEFAULT_PARAMS.n
+        : Number.isNaN(nextValue)
+          ? params.n
+          : Math.min(4, Math.max(1, Math.trunc(nextValue)))
     setNInput(String(normalizedValue))
     setParams({ n: normalizedValue })
   }, [nInput, params.n, setParams])
+
+  const handleSubmit = useCallback(async () => {
+    if (!settings.apiKey) {
+      setShowSettings(true)
+      return
+    }
+    if (!prompt.trim()) {
+      showToast('请输入提示词', 'error')
+      return
+    }
+    if (isSubmitting) return
+
+    setIsSubmitting(true)
+    try {
+      if (hasRunningTasks) {
+        showToast(`当前已有 ${runningTaskCount} 个任务正在进行，新任务会立即独立发起生成请求`, 'info')
+      }
+      await submitTask()
+    } finally {
+      setIsSubmitting(false)
+    }
+  }, [
+    hasRunningTasks,
+    isSubmitting,
+    prompt,
+    runningTaskCount,
+    setShowSettings,
+    settings.apiKey,
+    showToast,
+  ])
 
   const showModerationHint = () => {
     if (settings.apiMode === 'responses') setModerationHintVisible(true)
@@ -373,7 +427,7 @@ export default function InputBar() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault()
-      submitTask()
+      void handleSubmit()
     }
   }
 
@@ -1101,6 +1155,19 @@ export default function InputBar() {
 
           {/* 参数 + 按钮 */}
           <div className="mt-3">
+            {(hasRunningTasks || requestedImageCount > 1) && (
+              <div
+                className={`mb-3 rounded-2xl border px-3 py-2 text-xs leading-5 ${
+                  hasRunningTasks
+                    ? 'border-amber-200/80 bg-amber-50/90 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200'
+                    : 'border-sky-200/80 bg-sky-50/90 text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-200'
+                }`}
+              >
+                {hasRunningTasks
+                  ? `当前有 ${runningTaskCount} 个任务正在进行。新的提交会立刻独立发起请求，其他任务不会阻塞它。`
+                  : `当前数量为 ${requestedImageCount}，提交后会并发发起 ${requestedImageCount} 个生成请求。为避免请求堆积，单次提交发出后会暂时锁定按钮。`}
+              </div>
+            )}
             {/* 桌面端布局 */}
             <div className="hidden sm:flex items-end justify-between gap-3">
               {renderParams('grid-cols-6')}
@@ -1131,20 +1198,31 @@ export default function InputBar() {
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >
-                  <ButtonTooltip visible={!settings.apiKey && submitHover} text="尚未完成 API 配置，请在右上角设置中进行" />
+                  <ButtonTooltip visible={Boolean(submitHint) && submitHover} text={submitHint} />
                   <button
-                    onClick={() => settings.apiKey ? submitTask() : setShowSettings(true)}
+                    onClick={() => void handleSubmit()}
                     disabled={settings.apiKey ? !canSubmit : false}
                     className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow ${
                       !settings.apiKey
                         ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
                         : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
                     }`}
-                    title={settings.apiKey ? (maskDraft ? '遮罩编辑 (Ctrl+Enter)' : '生成 (Ctrl+Enter)') : '请先配置 API'}
+                    title={submitHint || (settings.apiKey ? (maskDraft ? '遮罩编辑 (Ctrl+Enter)' : '生成 (Ctrl+Enter)') : '请先配置 API')}
                   >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
+                    {isSubmitting ? (
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                        <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z" />
+                      </svg>
+                    ) : hasRunningTasks ? (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h8m-8 5h8m-8 5h5" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                      </svg>
+                    )}
                   </button>
                 </div>
               </div>
@@ -1185,20 +1263,32 @@ export default function InputBar() {
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >
-                  <ButtonTooltip visible={!settings.apiKey && submitHover} text="尚未完成 API 配置，请在右上角设置中进行" />
+                  <ButtonTooltip visible={Boolean(submitHint) && submitHover} text={submitHint} />
                   <button
-                    onClick={() => settings.apiKey ? submitTask() : setShowSettings(true)}
+                    onClick={() => void handleSubmit()}
                     disabled={settings.apiKey ? !canSubmit : false}
                     className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all shadow-sm ${
                       !settings.apiKey
                         ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
                         : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
                     }`}
+                    title={submitHint || (settings.apiKey ? (maskDraft ? '遮罩编辑 (Ctrl+Enter)' : '生成 (Ctrl+Enter)') : '请先配置 API')}
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
-                    {maskDraft ? '遮罩编辑' : '生成图像'}
+                    {isSubmitting ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                        <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z" />
+                      </svg>
+                    ) : hasRunningTasks ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h8m-8 5h8m-8 5h5" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                      </svg>
+                    )}
+                    {isSubmitting ? '提交中...' : hasRunningTasks ? '并发生成' : maskDraft ? '遮罩编辑' : '生成图像'}
                   </button>
                 </div>
               </div>

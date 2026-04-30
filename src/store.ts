@@ -21,6 +21,8 @@ import {
   clearImages,
   storeImage,
   hashDataUrl,
+  buildStoredImageFromBytes,
+  migrateStoredImageRecord,
 } from './lib/db'
 import { callImageApi } from './lib/api'
 import { validateMaskMatchesImage } from './lib/canvasImage'
@@ -31,21 +33,180 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 // ===== Image cache =====
 // 内存缓存，id → dataUrl，避免每次从 IndexedDB 读取
 
-const imageCache = new Map<string, string>()
+const FULL_IMAGE_CACHE_LIMIT = 32
+const PREVIEW_IMAGE_CACHE_LIMIT = 160
+const IMAGE_DATA_URL_CACHE_LIMIT = 20
+const IMAGE_META_CACHE_LIMIT = 400
 
-export function getCachedImage(id: string): string | undefined {
-  return imageCache.get(id)
+const imageFullSrcCache = new Map<string, string>()
+const imagePreviewSrcCache = new Map<string, string>()
+const imageDataUrlCache = new Map<string, string>()
+const imageMetaCache = new Map<string, { width?: number; height?: number }>()
+
+function revokeObjectUrlIfNeeded(src: string | undefined) {
+  if (src?.startsWith('blob:')) {
+    URL.revokeObjectURL(src)
+  }
 }
 
-export async function ensureImageCached(id: string): Promise<string | undefined> {
-  if (imageCache.has(id)) return imageCache.get(id)
+function setLimitedCache(cache: Map<string, string>, id: string, value: string, limit: number) {
+  const existing = cache.get(id)
+  if (existing && existing !== value) {
+    revokeObjectUrlIfNeeded(existing)
+  }
+  if (existing) {
+    cache.delete(id)
+  }
+  cache.set(id, value)
+  while (cache.size > limit) {
+    const oldestKey = cache.keys().next().value as string | undefined
+    if (!oldestKey) break
+    const oldestValue = cache.get(oldestKey)
+    cache.delete(oldestKey)
+    revokeObjectUrlIfNeeded(oldestValue)
+  }
+}
+
+function setLimitedMetaCache(id: string, width?: number, height?: number) {
+  if (width == null && height == null) return
+  if (imageMetaCache.has(id)) imageMetaCache.delete(id)
+  imageMetaCache.set(id, { width, height })
+  while (imageMetaCache.size > IMAGE_META_CACHE_LIMIT) {
+    const oldestKey = imageMetaCache.keys().next().value as string | undefined
+    if (!oldestKey) break
+    imageMetaCache.delete(oldestKey)
+  }
+}
+
+export function getCachedImage(
+  id: string,
+  variant: 'full' | 'preview' = 'full',
+  allowCrossVariantFallback = true,
+): string | undefined {
+  if (variant === 'preview') {
+    return allowCrossVariantFallback
+      ? imagePreviewSrcCache.get(id) ?? imageFullSrcCache.get(id) ?? imageDataUrlCache.get(id)
+      : imagePreviewSrcCache.get(id) ?? imageDataUrlCache.get(id)
+  }
+  return allowCrossVariantFallback
+    ? imageFullSrcCache.get(id) ?? imagePreviewSrcCache.get(id) ?? imageDataUrlCache.get(id)
+    : imageFullSrcCache.get(id) ?? imageDataUrlCache.get(id)
+}
+
+export function getCachedImageMetadata(id: string): { width?: number; height?: number } | undefined {
+  return imageMetaCache.get(id)
+}
+
+function clearCachedImage(id: string) {
+  revokeObjectUrlIfNeeded(imageFullSrcCache.get(id))
+  revokeObjectUrlIfNeeded(imagePreviewSrcCache.get(id))
+  imageFullSrcCache.delete(id)
+  imagePreviewSrcCache.delete(id)
+  imageDataUrlCache.delete(id)
+  imageMetaCache.delete(id)
+}
+
+function clearAllCachedImages() {
+  for (const value of imageFullSrcCache.values()) revokeObjectUrlIfNeeded(value)
+  for (const value of imagePreviewSrcCache.values()) revokeObjectUrlIfNeeded(value)
+  imageFullSrcCache.clear()
+  imagePreviewSrcCache.clear()
+  imageDataUrlCache.clear()
+  imageMetaCache.clear()
+}
+
+async function ensureImageRecord(id: string) {
   const rec = await getImage(id)
   if (rec) {
-    imageCache.set(id, rec.dataUrl)
+    setLimitedMetaCache(id, rec.width, rec.height)
+  }
+  return rec
+}
+
+async function ensureImageObjectUrl(id: string, variant: 'full' | 'preview'): Promise<string | undefined> {
+  const cache = variant === 'preview' ? imagePreviewSrcCache : imageFullSrcCache
+  const limit = variant === 'preview' ? PREVIEW_IMAGE_CACHE_LIMIT : FULL_IMAGE_CACHE_LIMIT
+  const cached = cache.get(id)
+  if (cached) return cached
+
+  const rec = await ensureImageRecord(id)
+  if (!rec) return undefined
+
+  const preferredBlob = variant === 'preview'
+    ? rec.previewBlob ?? rec.blob
+    : rec.blob ?? rec.previewBlob
+
+  if (preferredBlob) {
+    const objectUrl = URL.createObjectURL(preferredBlob)
+    setLimitedCache(cache, id, objectUrl, limit)
+    return objectUrl
+  }
+
+  const legacySrc = rec.dataUrl || rec.src
+  if (!legacySrc) return undefined
+  setLimitedCache(cache, id, legacySrc, limit)
+  if (rec.dataUrl) {
+    setLimitedCache(imageDataUrlCache, id, rec.dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
+  }
+  return legacySrc
+}
+
+export async function ensureImageSrc(id: string): Promise<string | undefined> {
+  return ensureImageObjectUrl(id, 'full')
+}
+
+export async function ensureImagePreviewSrc(id: string): Promise<string | undefined> {
+  return ensureImageObjectUrl(id, 'preview')
+}
+
+export function ensureOriginalImageSrc(id: string): Promise<string | undefined> {
+  return ensureImageSrc(id)
+}
+
+export async function ensureImageMetadata(id: string): Promise<{ width?: number; height?: number } | undefined> {
+  const cached = imageMetaCache.get(id)
+  if (cached) return cached
+  const rec = await ensureImageRecord(id)
+  if (!rec) return undefined
+  return { width: rec.width, height: rec.height }
+}
+
+async function fetchImageAsDataUrl(src: string): Promise<string> {
+  const response = await fetch(src, { cache: 'no-store' })
+  if (!response.ok) {
+    throw new Error(`Failed to load image: HTTP ${response.status}`)
+  }
+  return blobToDataUrl(await response.blob())
+}
+
+export async function ensureImageDataUrl(id: string): Promise<string | undefined> {
+  const cached = imageDataUrlCache.get(id)
+  if (cached) return cached
+
+  const rec = await ensureImageRecord(id)
+  if (!rec) return undefined
+
+  if (rec.dataUrl) {
+    setLimitedCache(imageDataUrlCache, id, rec.dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
     return rec.dataUrl
   }
+
+  if (rec.blob) {
+    const dataUrl = await blobToDataUrl(rec.blob)
+    setLimitedCache(imageDataUrlCache, id, dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
+    return dataUrl
+  }
+
+  if (rec.src) {
+    const dataUrl = await fetchImageAsDataUrl(rec.src)
+    setLimitedCache(imageDataUrlCache, id, dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
+    return dataUrl
+  }
+
   return undefined
 }
+
+export const ensureImageCached = ensureImageSrc
 
 function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: string | null | undefined) {
   if (!maskTargetImageId) return images
@@ -55,6 +216,64 @@ function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: strin
   const [maskImage] = next.splice(maskIdx, 1)
   next.unshift(maskImage)
   return next
+}
+
+export const TASK_INTERRUPTED_MESSAGE = '任务因页面刷新或应用关闭而中断，请重试'
+
+const pendingTaskIds: string[] = []
+let queueFlushScheduled = false
+
+function getTaskRequestedCount(task: Pick<TaskRecord, 'params' | 'requestedCount'>): number {
+  const requestedCount = task.requestedCount ?? task.params?.n ?? 1
+  return Number.isFinite(requestedCount) && requestedCount > 0 ? requestedCount : 1
+}
+
+function getTaskCompletedCount(task: Pick<TaskRecord, 'outputImages' | 'completedCount'>): number {
+  return Math.max(task.completedCount ?? 0, task.outputImages?.length ?? 0)
+}
+
+function getTaskFailedCount(task: Pick<TaskRecord, 'failedCount'>, requestedCount: number, completedCount: number): number {
+  return Math.max(task.failedCount ?? 0, requestedCount - completedCount)
+}
+
+function normalizeRequestedCount(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_PARAMS.n
+  return Math.min(4, Math.max(1, Math.trunc(value)))
+}
+
+function enqueueTask(taskId: string) {
+  if (!pendingTaskIds.includes(taskId)) {
+    pendingTaskIds.push(taskId)
+  }
+  flushTaskQueue()
+}
+
+function flushTaskQueue() {
+  if (queueFlushScheduled) return
+  queueFlushScheduled = true
+
+  queueMicrotask(() => {
+    queueFlushScheduled = false
+
+    while (pendingTaskIds.length > 0) {
+      const nextTaskId = pendingTaskIds.shift()
+      if (!nextTaskId) return
+
+      const task = useStore.getState().tasks.find((item) => item.id === nextTaskId)
+      if (!task || task.status !== 'running' || task.executionState !== 'queued') {
+        continue
+      }
+
+      updateTaskInStore(nextTaskId, {
+        executionState: 'processing',
+        startedAt: task.startedAt ?? Date.now(),
+      })
+
+      void executeTask(nextTaskId).finally(() => {
+        flushTaskQueue()
+      })
+    }
+  })
 }
 
 // ===== Store 类型 =====
@@ -173,7 +392,7 @@ export const useStore = create<AppState>()(
         }),
       clearInputImages: () =>
         set((s) => {
-          for (const img of s.inputImages) imageCache.delete(img.id)
+          for (const img of s.inputImages) clearCachedImage(img.id)
           return { inputImages: [], maskDraft: null, maskEditorImageId: null }
         }),
       setInputImages: (imgs) =>
@@ -312,17 +531,90 @@ function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): 
     ...params,
     size: normalizeImageSize(params.size) || DEFAULT_PARAMS.size,
     quality: settings.codexCli ? DEFAULT_PARAMS.quality : params.quality,
+    n: normalizeRequestedCount(params.n),
   }
 }
 
 /** 初始化：从 IndexedDB 加载任务和图片缓存，清理孤立图片 */
-export async function initStore() {
+export async function initStore(options: { resumeActiveTasks?: boolean } = {}) {
   const tasks = await getAllTasks()
-  useStore.getState().setTasks(tasks)
+  const now = Date.now()
+  const resumeActiveTasks = options.resumeActiveTasks === true
+  const normalizedTasks = tasks.map((task) => {
+    const requestedCount = getTaskRequestedCount(task)
+    const completedCount = getTaskCompletedCount(task)
+    const remainingCount = Math.max(0, requestedCount - completedCount)
+
+    if (task.status !== 'running') {
+      return {
+        ...task,
+        requestedCount,
+        completedCount,
+        failedCount: getTaskFailedCount(task, requestedCount, completedCount),
+      }
+    }
+
+    if (remainingCount <= 0) {
+      return {
+        ...task,
+        status: 'done' as const,
+        executionState: undefined,
+        requestedCount,
+        completedCount,
+        failedCount: 0,
+        error: null,
+        finishedAt: task.finishedAt ?? now,
+        elapsed: task.elapsed ?? Math.max(0, now - (task.startedAt ?? task.createdAt)),
+      }
+    }
+
+    if (resumeActiveTasks) {
+      return {
+        ...task,
+        status: 'running' as const,
+        executionState: 'queued' as const,
+        requestedCount,
+        completedCount,
+        failedCount: task.failedCount ?? 0,
+        error: null,
+        startedAt: null,
+        finishedAt: null,
+        elapsed: null,
+      }
+    }
+
+    return {
+      ...task,
+      status: 'error' as const,
+      executionState: undefined,
+      requestedCount,
+      completedCount,
+      failedCount: getTaskFailedCount(task, requestedCount, completedCount),
+      error: TASK_INTERRUPTED_MESSAGE,
+      finishedAt: now,
+      elapsed: Math.max(0, now - task.createdAt),
+    }
+  })
+  useStore.getState().setTasks(normalizedTasks)
+  await Promise.all(
+    normalizedTasks.map((task) =>
+      putTask(task).catch((error) => {
+        console.error('Failed to normalize task state during init:', error)
+      }),
+    ),
+  )
 
   // 收集所有任务引用的图片 id
+  if (resumeActiveTasks) {
+    for (const task of normalizedTasks) {
+      if (task.status === 'running' && task.executionState === 'queued') {
+        enqueueTask(task.id)
+      }
+    }
+  }
+
   const referencedIds = new Set<string>()
-  for (const t of tasks) {
+  for (const t of normalizedTasks) {
     for (const id of t.inputImageIds || []) referencedIds.add(id)
     if (t.maskImageId) referencedIds.add(t.maskImageId)
     for (const id of t.outputImages || []) referencedIds.add(id)
@@ -331,15 +623,57 @@ export async function initStore() {
   // 预加载所有图片到缓存，同时清理孤立图片
   const images = await getAllImages()
   for (const img of images) {
-    if (referencedIds.has(img.id)) {
-      imageCache.set(img.id, img.dataUrl)
-    } else {
+    if (!referencedIds.has(img.id)) {
       await deleteImage(img.id)
+      continue
+    }
+
+    if (!img.blob || !img.previewBlob) {
+      try {
+        const migrated = await migrateStoredImageRecord(img)
+        if (migrated) {
+          await putImage(migrated)
+        }
+      } catch (error) {
+        console.warn(`Failed to migrate stored image ${img.id}:`, error)
+      }
     }
   }
 }
 
 /** 提交新任务 */
+async function appendTaskImageResult(
+  taskId: string,
+  result: {
+    image: string
+    actualParams?: Partial<TaskParams>
+    revisedPrompt?: string
+  },
+) {
+  const imgId = await storeImage(result.image, 'generated')
+
+  const task = useStore.getState().tasks.find((item) => item.id === taskId)
+  if (!task || task.outputImages.includes(imgId)) return
+
+  const outputImages = [...task.outputImages, imgId]
+  const actualParamsByImage = { ...(task.actualParamsByImage ?? {}) }
+  const revisedPromptByImage = { ...(task.revisedPromptByImage ?? {}) }
+
+  if (result.actualParams && Object.keys(result.actualParams).length > 0) {
+    actualParamsByImage[imgId] = result.actualParams
+  }
+  if (result.revisedPrompt?.trim()) {
+    revisedPromptByImage[imgId] = result.revisedPrompt
+  }
+
+  updateTaskInStore(taskId, {
+    outputImages,
+    completedCount: outputImages.length,
+    actualParamsByImage: Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
+    revisedPromptByImage: Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
+  })
+}
+
 export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   const { settings, prompt, inputImages, maskDraft, params, showToast, setConfirmDialog } =
     useStore.getState()
@@ -376,7 +710,6 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
         return
       }
       maskImageId = await storeImage(maskDraft.maskDataUrl, 'mask')
-      imageCache.set(maskImageId, maskDraft.maskDataUrl)
       maskTargetImageId = maskDraft.targetImageId
     } catch (err) {
       if (!inputImages.some((img) => img.id === maskDraft.targetImageId)) {
@@ -393,8 +726,16 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   }
 
   const normalizedParams = normalizeParamsForSettings(params, settings)
-  if (normalizedParams.size !== params.size || normalizedParams.quality !== params.quality) {
-    useStore.getState().setParams({ size: normalizedParams.size, quality: normalizedParams.quality })
+  if (
+    normalizedParams.size !== params.size ||
+    normalizedParams.quality !== params.quality ||
+    normalizedParams.n !== params.n
+  ) {
+    useStore.getState().setParams({
+      size: normalizedParams.size,
+      quality: normalizedParams.quality,
+      n: normalizedParams.n,
+    })
   }
 
   const taskId = genId()
@@ -407,8 +748,13 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     maskImageId,
     outputImages: [],
     status: 'running',
+    executionState: 'queued',
+    requestedCount: normalizeRequestedCount(normalizedParams.n),
+    completedCount: 0,
+    failedCount: 0,
     error: null,
     createdAt: Date.now(),
+    startedAt: null,
     finishedAt: null,
     elapsed: null,
   }
@@ -423,7 +769,7 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   }
 
   // 异步调用 API
-  void executeTask(taskId)
+  enqueueTask(taskId)
 }
 
 async function executeTask(taskId: string) {
@@ -432,46 +778,69 @@ async function executeTask(taskId: string) {
   if (!task) return
 
   try {
+    const requestedCount = getTaskRequestedCount(task)
+    const completedCountBeforeRun = getTaskCompletedCount(task)
+    const remainingCount = Math.max(0, requestedCount - completedCountBeforeRun)
+
+    if (remainingCount <= 0) {
+      updateTaskInStore(taskId, {
+        status: 'done',
+        executionState: undefined,
+        completedCount: completedCountBeforeRun,
+        failedCount: 0,
+        error: null,
+        finishedAt: Date.now(),
+        elapsed: Date.now() - (task.startedAt ?? task.createdAt),
+      })
+      return
+    }
+
     // 获取输入图片 data URLs
     const inputDataUrls: string[] = []
     for (const imgId of task.inputImageIds) {
-      const dataUrl = await ensureImageCached(imgId)
+      const dataUrl = await ensureImageDataUrl(imgId)
       if (!dataUrl) throw new Error('输入图片已不存在')
       inputDataUrls.push(dataUrl)
     }
     let maskDataUrl: string | undefined
     if (task.maskImageId) {
-      maskDataUrl = await ensureImageCached(task.maskImageId)
+      maskDataUrl = await ensureImageDataUrl(task.maskImageId)
       if (!maskDataUrl) throw new Error('遮罩图片已不存在')
     }
 
     const result = await callImageApi({
       settings,
       prompt: task.prompt,
-      params: task.params,
+      params: { ...task.params, n: remainingCount },
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
+      onImage: async (partialResult) => {
+        await appendTaskImageResult(taskId, {
+          image: partialResult.image,
+          actualParams: partialResult.actualParams,
+          revisedPrompt: partialResult.revisedPrompt,
+        })
+      },
     })
 
     // 存储输出图片
-    const outputIds: string[] = []
-    for (const dataUrl of result.images) {
-      const imgId = await storeImage(dataUrl, 'generated')
-      imageCache.set(imgId, dataUrl)
-      outputIds.push(imgId)
+    for (let index = 0; index < result.images.length; index += 1) {
+      await appendTaskImageResult(taskId, {
+        image: result.images[index],
+        actualParams: result.actualParamsList?.[index],
+        revisedPrompt: result.revisedPrompts?.[index],
+      })
     }
-    const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
-      const imgId = outputIds[index]
-      if (imgId && params && Object.keys(params).length > 0) acc[imgId] = params
-      return acc
-    }, {})
-    const revisedPromptByImage = result.revisedPrompts?.reduce<Record<string, string>>((acc, revisedPrompt, index) => {
-      const imgId = outputIds[index]
-      if (imgId && revisedPrompt && revisedPrompt.trim()) acc[imgId] = revisedPrompt
-      return acc
-    }, {})
+
+    const latestTask = useStore.getState().tasks.find((item) => item.id === taskId)
+    if (!latestTask) return
+
+    const outputIds = latestTask.outputImages
+    const finalRequestedCount = getTaskRequestedCount(latestTask)
+    const completedCount = getTaskCompletedCount(latestTask)
+    const failedCount = Math.max(0, finalRequestedCount - completedCount)
     const promptWasRevised = result.revisedPrompts?.some(
-      (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== task.prompt.trim(),
+      (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== latestTask.prompt.trim(),
     )
     const hasRevisedPromptValue = result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
     if (!settings.codexCli) {
@@ -484,16 +853,22 @@ async function executeTask(taskId: string) {
 
     // 更新任务
     updateTaskInStore(taskId, {
-      outputImages: outputIds,
       actualParams: { ...result.actualParams, n: outputIds.length },
-      actualParamsByImage: actualParamsByImage && Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
-      revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
+      completedCount,
+      failedCount,
+      executionState: undefined,
       status: 'done',
       finishedAt: Date.now(),
-      elapsed: Date.now() - task.createdAt,
+      elapsed: Date.now() - latestTask.createdAt,
+      error: null,
     })
 
-    useStore.getState().showToast(`生成完成，共 ${outputIds.length} 张图片`, 'success')
+    useStore.getState().showToast(
+      failedCount > 0
+        ? `已生成 ${completedCount}/${finalRequestedCount} 张图片，${failedCount} 张未返回结果`
+        : `生成完成，共 ${outputIds.length} 张图片`,
+      failedCount > 0 ? 'info' : 'success',
+    )
     const currentMask = useStore.getState().maskDraft
     if (
       maskDataUrl &&
@@ -507,6 +882,7 @@ async function executeTask(taskId: string) {
     const errorMessage = err instanceof Error ? err.message : String(err)
     updateTaskInStore(taskId, {
       status: 'error',
+      executionState: undefined,
       error: errorMessage,
       finishedAt: Date.now(),
       elapsed: Date.now() - task.createdAt,
@@ -517,7 +893,7 @@ async function executeTask(taskId: string) {
 
   // 释放输入图片的内存缓存（已持久化到 IndexedDB，后续按需从 DB 加载）
   for (const imgId of task.inputImageIds) {
-    imageCache.delete(imgId)
+    clearCachedImage(imgId)
   }
 }
 
@@ -549,8 +925,13 @@ export async function retryTask(task: TaskRecord) {
     maskImageId: task.maskImageId ?? null,
     outputImages: [],
     status: 'running',
+    executionState: 'queued',
+    requestedCount: normalizeRequestedCount(normalizedParams.n),
+    completedCount: 0,
+    failedCount: 0,
     error: null,
     createdAt: Date.now(),
+    startedAt: null,
     finishedAt: null,
     elapsed: null,
   }
@@ -564,7 +945,7 @@ export async function retryTask(task: TaskRecord) {
     useStore.getState().showToast('任务已重新开始，但本地记录保存失败。', 'error')
   }
 
-  void executeTask(taskId)
+  enqueueTask(taskId)
 }
 
 /** 复用配置 */
@@ -576,7 +957,7 @@ export async function reuseConfig(task: TaskRecord) {
   // 恢复输入图片
   const imgs: InputImage[] = []
   for (const imgId of task.inputImageIds) {
-    const dataUrl = await ensureImageCached(imgId)
+    const dataUrl = await ensureImageDataUrl(imgId)
     if (dataUrl) {
       imgs.push({ id: imgId, dataUrl })
     }
@@ -584,7 +965,7 @@ export async function reuseConfig(task: TaskRecord) {
   setInputImages(imgs)
   const maskTargetImageId = task.maskTargetImageId ?? (task.maskImageId ? task.inputImageIds[0] : null)
   if (maskTargetImageId && task.maskImageId && imgs.some((img) => img.id === maskTargetImageId)) {
-    const maskDataUrl = await ensureImageCached(task.maskImageId)
+    const maskDataUrl = await ensureImageDataUrl(task.maskImageId)
     if (maskDataUrl) {
       setMaskDraft({
         targetImageId: maskTargetImageId,
@@ -608,7 +989,7 @@ export async function editOutputs(task: TaskRecord) {
   let added = 0
   for (const imgId of task.outputImages) {
     if (inputImages.find((i) => i.id === imgId)) continue
-    const dataUrl = await ensureImageCached(imgId)
+    const dataUrl = await ensureImageDataUrl(imgId)
     if (dataUrl) {
       addInputImage({ id: imgId, dataUrl })
       added++
@@ -654,7 +1035,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
   for (const imgId of deletedImageIds) {
     if (!stillUsed.has(imgId)) {
       await deleteImage(imgId)
-      imageCache.delete(imgId)
+      clearCachedImage(imgId)
     }
   }
 
@@ -696,7 +1077,7 @@ export async function removeTask(task: TaskRecord) {
   for (const imgId of taskImageIds) {
     if (!stillUsed.has(imgId)) {
       await deleteImage(imgId)
-      imageCache.delete(imgId)
+      clearCachedImage(imgId)
     }
   }
 
@@ -707,7 +1088,7 @@ export async function removeTask(task: TaskRecord) {
 export async function clearAllData() {
   await dbClearTasks()
   await clearImages()
-  imageCache.clear()
+  clearAllCachedImages()
   const { setTasks, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
   setTasks([])
   clearInputImages()
@@ -739,6 +1120,42 @@ function bytesToDataUrl(bytes: Uint8Array, filePath: string): string {
   return `data:${mime};base64,${btoa(binary)}`
 }
 
+function mimeTypeToExt(mimeType: string | undefined): string {
+  const normalized = (mimeType || '').toLowerCase()
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg'
+  if (normalized.includes('webp')) return 'webp'
+  if (normalized.includes('png')) return 'png'
+  return 'png'
+}
+
+async function storedImageToBytes(img: Awaited<ReturnType<typeof getAllImages>>[number]): Promise<{ ext: string; bytes: Uint8Array }> {
+  if (img.blob) {
+    return {
+      ext: mimeTypeToExt(img.blob.type || img.mimeType),
+      bytes: new Uint8Array(await img.blob.arrayBuffer()),
+    }
+  }
+  const legacySrc = img.src
+  if (legacySrc && (img.srcKind === 'dataUrl' || legacySrc.startsWith('data:'))) {
+    return dataUrlToBytes(legacySrc)
+  }
+
+  if (!legacySrc) {
+    throw new Error('瀵煎嚭鍥剧墖澶辫触: 缺少图片数据')
+  }
+
+  const response = await fetch(legacySrc, { cache: 'no-store' })
+  if (!response.ok) {
+    throw new Error(`导出图片失败: HTTP ${response.status}`)
+  }
+
+  const blob = await response.blob()
+  return {
+    ext: mimeTypeToExt(blob.type || img.mimeType),
+    bytes: new Uint8Array(await blob.arrayBuffer()),
+  }
+}
+
 /** 导出数据为 ZIP */
 export async function exportData() {
   try {
@@ -765,7 +1182,7 @@ export async function exportData() {
     const zipFiles: Record<string, Uint8Array | [Uint8Array, { mtime: Date }]> = {}
 
     for (const img of images) {
-      const { ext, bytes } = dataUrlToBytes(img.dataUrl)
+      const { ext, bytes } = await storedImageToBytes(img)
       const path = `images/${img.id}.${ext}`
       const createdAt = img.createdAt ?? imageCreatedAtFallback.get(img.id) ?? exportedAt
       imageFiles[img.id] = { path, createdAt, source: img.source }
@@ -817,9 +1234,21 @@ export async function importData(file: File) {
     for (const [id, info] of Object.entries(data.imageFiles)) {
       const bytes = unzipped[info.path]
       if (!bytes) continue
-      const dataUrl = bytesToDataUrl(bytes, info.path)
-      await putImage({ id, dataUrl, createdAt: info.createdAt, source: info.source })
-      imageCache.set(id, dataUrl)
+      const ext = info.path.split('.').pop()?.toLowerCase() ?? 'png'
+      const mimeTypeMap: Record<string, string> = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        webp: 'image/webp',
+      }
+      const storedImage = await buildStoredImageFromBytes(
+        bytes,
+        mimeTypeMap[ext] ?? 'image/png',
+        info.source ?? 'generated',
+        info.createdAt,
+        id,
+      )
+      await putImage(storedImage)
     }
 
     for (const task of data.tasks) {
@@ -850,7 +1279,9 @@ export async function addImageFromFile(file: File): Promise<void> {
   if (!file.type.startsWith('image/')) return
   const dataUrl = await fileToDataUrl(file)
   const id = await hashDataUrl(dataUrl)
-  imageCache.set(id, dataUrl)
+  setLimitedCache(imageFullSrcCache, id, dataUrl, FULL_IMAGE_CACHE_LIMIT)
+  setLimitedCache(imagePreviewSrcCache, id, dataUrl, PREVIEW_IMAGE_CACHE_LIMIT)
+  setLimitedCache(imageDataUrlCache, id, dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
   useStore.getState().addInputImage({ id, dataUrl })
 }
 
@@ -861,7 +1292,9 @@ export async function addImageFromUrl(src: string): Promise<void> {
   if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
   const dataUrl = await blobToDataUrl(blob)
   const id = await hashDataUrl(dataUrl)
-  imageCache.set(id, dataUrl)
+  setLimitedCache(imageFullSrcCache, id, dataUrl, FULL_IMAGE_CACHE_LIMIT)
+  setLimitedCache(imagePreviewSrcCache, id, dataUrl, PREVIEW_IMAGE_CACHE_LIMIT)
+  setLimitedCache(imageDataUrlCache, id, dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
   useStore.getState().addInputImage({ id, dataUrl })
 }
 

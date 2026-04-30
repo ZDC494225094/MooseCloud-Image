@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import App from './App'
+import RootApp from './RootApp'
 import './index.css'
 import { installMobileViewportGuards } from './lib/viewport'
 import { initializeTheme } from './lib/theme'
@@ -24,6 +24,6 @@ if ('serviceWorker' in navigator) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <RootApp />
   </StrictMode>,
 )

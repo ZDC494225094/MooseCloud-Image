@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { ensureImageCached, useStore } from '../store'
+import { ensureImageDataUrl, useStore } from '../store'
 import { canvasToBlob, loadImage } from '../lib/canvasImage'
 import { storeImage } from '../lib/db'
 import { prepareMaskTargetDataUrl, replaceMaskTargetImage } from '../lib/maskPreprocess'
@@ -476,7 +476,7 @@ export default function MaskEditorModal() {
 
     async function loadCanvases() {
       try {
-        const dataUrl = await ensureImageCached(targetImageId)
+        const dataUrl = await ensureImageDataUrl(targetImageId)
         if (cancelled) return
         if (!dataUrl) {
           showToast('图片已不存在，无法编辑遮罩', 'error')

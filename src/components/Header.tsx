@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useStore } from '../store'
+import FloatingPageActions from './FloatingPageActions'
 import HelpModal from './HelpModal'
-import ThemeToggle from './ThemeToggle'
 
 const NAV_BUTTON_CLASS_NAME =
   'rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
@@ -31,15 +31,6 @@ export default function Header() {
           <div className="flex items-center gap-2">
             <a href="./" className={NAV_BUTTON_CLASS_NAME} title="画廊">
               画廊
-            </a>
-            <a
-              href="https://moosecloud.cc"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={NAV_BUTTON_CLASS_NAME}
-              title="主站"
-            >
-              主站
             </a>
             <button
               onClick={() => setShowHelp(true)}
@@ -89,7 +80,7 @@ export default function Header() {
         </div>
       </header>
 
-      <ThemeToggle />
+      <FloatingPageActions />
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
     </>
   )
