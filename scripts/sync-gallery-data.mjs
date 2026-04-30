@@ -7,13 +7,16 @@ import { fileURLToPath } from 'node:url'
 const GITHUB_README_URL =
   'https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-prompts/main/README.md'
 const GITHUB_REPO_URL = 'https://github.com/EvoLinkAI/awesome-gpt-image-2-prompts'
+const GITHUB_RAW_BASE_URL =
+  'https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-prompts/main/'
 const GITHUB_IMAGE_BASE_URL =
   'https://cdn.jsdelivr.net/gh/EvoLinkAI/awesome-gpt-image-2-prompts@main/'
 
 const OPENNANA_SITE_URL = 'https://opennana.com/awesome-prompt-gallery?media_type=image'
 const OPENNANA_API_BASE_URL = 'https://api.opennana.com/api'
-const OPENNANA_PAGE_SIZE = 20
-const OPENNANA_MAX_ITEMS = readPositiveIntEnv('OPENNANA_MAX_ITEMS', 200)
+const OPENNANA_PAGE_SIZE = 100
+const OPENNANA_MAX_ITEMS = readPositiveIntEnv('OPENNANA_MAX_ITEMS', Number.POSITIVE_INFINITY)
+const OPENNANA_DETAIL_ITEMS = readPositiveIntEnv('OPENNANA_DETAIL_ITEMS', 200)
 const OPENNANA_CONCURRENCY = readPositiveIntEnv('OPENNANA_CONCURRENCY', 8)
 
 const execFileAsync = promisify(execFile)
@@ -41,6 +44,20 @@ function readPositiveIntEnv(name, fallbackValue) {
 
 function buildGithubImageUrl(relativePath) {
   return `${GITHUB_IMAGE_BASE_URL}${relativePath.replace(/^\.\//, '')}`
+}
+
+function buildGithubRawUrl(relativePath) {
+  return `${GITHUB_RAW_BASE_URL}${relativePath.replace(/^\.\//, '')}`
+}
+
+function toSafeId(value, fallback = 'item') {
+  const normalized = normalizeUrl(value)
+    .toLowerCase()
+    .replace(/^https?:\/\/(www\.)?/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return normalized || fallback
 }
 
 function normalizeUrl(value) {
@@ -74,42 +91,34 @@ function pickPrimaryPrompt(promptVariants) {
 }
 
 function parseGithubCases(markdown) {
-  const lines = markdown.split(/\r?\n/)
-  const cases = []
-  let currentCategory = ''
+  const categoryMatches = [...markdown.matchAll(/^#{1,3}\s+(.+?Cases)(?:\s+>|$)/gm)].map(
+    (match) => ({
+      index: match.index ?? 0,
+      category: match[1].trim(),
+    }),
+  )
+  const caseHeadingMatches = [
+    ...markdown.matchAll(
+      /^###\s+Case\s+(\d+):\s+\[(.+?)\]\((https?:\/\/[^\s)]+)\)\s+\(by\s+\[@([^\]]+)\]\((https?:\/\/[^\s)]+)\)\)\s*$/gm,
+    ),
+  ]
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]
-    const categoryMatch = line.match(/^##\s+(.+?)\s*$/)
-
-    if (categoryMatch) {
-      const heading = categoryMatch[1].trim()
-      if (/Cases$/i.test(heading)) {
-        currentCategory = heading
-      }
-    }
-
-    const caseHeadingMatch = line.match(
-      /^###\s+Case\s+(\d+):\s+\[(.+?)\]\((https?:\/\/[^\s)]+)\)\s+\(by\s+\[@([^\]]+)\]\((https?:\/\/[^\s)]+)\)\)\s*$/,
-    )
-
-    if (!caseHeadingMatch) continue
-
+  const cases = caseHeadingMatches.map((caseHeadingMatch, index) => {
     const caseNumber = Number(caseHeadingMatch[1])
     const title = caseHeadingMatch[2].trim()
     const tweetUrl = caseHeadingMatch[3]
     const authorHandle = caseHeadingMatch[4]
     const authorUrl = caseHeadingMatch[5]
-
-    let blockEnd = index + 1
-    while (blockEnd < lines.length) {
-      if (/^###\s+Case\s+\d+:/.test(lines[blockEnd])) break
-      if (/^##\s+.+Cases\s*$/.test(lines[blockEnd])) break
-      blockEnd += 1
-    }
-
-    const block = lines.slice(index + 1, blockEnd).join('\n')
-    const imageMatches = [...block.matchAll(/<img\s+src="\.\/([^"]+)"/g)]
+    const blockStart = (caseHeadingMatch.index ?? 0) + caseHeadingMatch[0].length
+    const blockEnd =
+      index < caseHeadingMatches.length - 1
+        ? (caseHeadingMatches[index + 1].index ?? markdown.length)
+        : markdown.length
+    const block = markdown.slice(blockStart, blockEnd)
+    const category =
+      [...categoryMatches].reverse().find((entry) => entry.index < (caseHeadingMatch.index ?? 0))
+        ?.category || ''
+    const imageMatches = [...block.matchAll(/<img\s+[^>]*src="\.\/([^"]+)"/g)]
     const imagePaths = unique(imageMatches.map((match) => match[1].trim()))
     const images = imagePaths.map(buildGithubImageUrl)
     const promptMatch = block.match(/\*\*Prompt:\*\*\s*```([\s\S]*?)```/)
@@ -123,11 +132,12 @@ function parseGithubCases(markdown) {
           },
         ]
       : []
+    const stableId = `github-${toSafeId(tweetUrl, `case-${caseNumber}`)}`
 
-    cases.push({
-      id: `github-case-${caseNumber}`,
+    return {
+      id: stableId,
       title,
-      category: currentCategory,
+      category,
       sourceType: 'github',
       sourceLabel: 'Awesome GPT Image 2 Prompts',
       sourceItemUrl: tweetUrl,
@@ -147,12 +157,46 @@ function parseGithubCases(markdown) {
       sortValue: caseNumber,
       createdAt: '',
       updatedAt: '',
-    })
-
-    index = blockEnd - 1
-  }
+    }
+  })
 
   return cases.sort((left, right) => right.caseNumber - left.caseNumber)
+}
+
+function extractGithubCaseFilePaths(readmeMarkdown) {
+  return unique(
+    [...readmeMarkdown.matchAll(/\((cases\/[a-z0-9-]+\.md)\)/gi)].map((match) => match[1].trim()),
+  )
+}
+
+async function fetchGithubCases() {
+  const readmeMarkdown = await download(GITHUB_README_URL)
+  const caseFilePaths = extractGithubCaseFilePaths(readmeMarkdown)
+  const allCases = new Map()
+
+  for (const item of parseGithubCases(readmeMarkdown)) {
+    allCases.set(item.sourceItemUrl || item.id, item)
+  }
+
+  if (caseFilePaths.length > 0) {
+    console.log(`Fetching ${caseFilePaths.length} GitHub case files...`)
+
+    const caseFileResults = await mapWithConcurrency(caseFilePaths, 4, async (relativePath) => ({
+      relativePath,
+      markdown: await download(buildGithubRawUrl(relativePath)),
+    }))
+
+    caseFileResults.forEach(({ relativePath, markdown }) => {
+      const parsedCases = parseGithubCases(markdown)
+      console.log(`Parsed ${parsedCases.length} GitHub cases from ${relativePath}`)
+
+      parsedCases.forEach((item) => {
+        allCases.set(item.sourceItemUrl || item.id, item)
+      })
+    })
+  }
+
+  return [...allCases.values()].sort((left, right) => right.caseNumber - left.caseNumber)
 }
 
 async function download(url) {
@@ -286,6 +330,7 @@ async function fetchOpenNanaDetail(slug) {
 }
 
 function normalizeOpenNanaCase(listItem, detail) {
+  const slug = normalizeUrl(detail.slug) || normalizeUrl(listItem.slug)
   const promptVariants = normalizePromptVariants(detail.prompts)
   const prompt = pickPrimaryPrompt(promptVariants)
   const sourceName = normalizeUrl(detail.source_name) || 'OpenNana'
@@ -302,12 +347,13 @@ function normalizeOpenNanaCase(listItem, detail) {
     ? detail.images.map(normalizeUrl).filter(Boolean)
     : []
   const tags = Array.isArray(detail.tags) ? detail.tags.map(normalizeUrl).filter(Boolean) : []
-  const sourceItemUrl = `https://opennana.com/awesome-prompt-gallery/${detail.slug}`
+  const sourceItemUrl = `https://opennana.com/awesome-prompt-gallery/${slug}`
   const category = normalizeUrl(detail.model) || 'OpenNana'
 
   return {
-    id: `opennana-${detail.id}`,
-    title: normalizeUrl(detail.title) || normalizeUrl(listItem.title) || detail.slug,
+    id: `opennana-${toSafeId(slug, String(detail.id || listItem.id || 'item'))}`,
+    slug,
+    title: normalizeUrl(detail.title) || normalizeUrl(listItem.title) || slug,
     category,
     sourceType: 'opennana',
     sourceLabel: 'OpenNana',
@@ -331,29 +377,79 @@ function normalizeOpenNanaCase(listItem, detail) {
   }
 }
 
+function normalizeOpenNanaListCase(listItem) {
+  const slug = normalizeUrl(listItem.slug)
+  const coverImage = normalizeUrl(listItem.cover_image)
+  const numericId = Number(listItem.id) || 0
+
+  return {
+    id: `opennana-${toSafeId(slug, String(numericId || 'item'))}`,
+    slug,
+    title: normalizeUrl(listItem.title) || slug || 'OpenNana',
+    category: 'OpenNana',
+    sourceType: 'opennana',
+    sourceLabel: 'OpenNana',
+    sourceItemUrl: `https://opennana.com/awesome-prompt-gallery/${slug}`,
+    externalSourceUrl: '',
+    sourceName: 'OpenNana',
+    authorHandle: '',
+    authorUrl: '',
+    model: '',
+    tags: [],
+    imagePaths: [],
+    coverImage,
+    images: coverImage ? [coverImage] : [],
+    prompt: '',
+    prompts: [],
+    promptLength: 0,
+    caseNumber: null,
+    sortValue: numericId,
+    createdAt: '',
+    updatedAt: '',
+  }
+}
+
 async function fetchOpenNanaCases() {
   const listItems = await fetchOpenNanaListItems()
   if (listItems.length === 0) return []
 
-  console.log(`Fetching ${listItems.length} OpenNana prompt details...`)
+  const detailTargetCount = Number.isFinite(OPENNANA_DETAIL_ITEMS)
+    ? Math.min(OPENNANA_DETAIL_ITEMS, listItems.length)
+    : listItems.length
+  const detailedItems = listItems.slice(0, detailTargetCount)
+  const detailMap = new Map()
 
-  const details = await mapWithConcurrency(listItems, OPENNANA_CONCURRENCY, async (item, index) => {
-    const slug = normalizeUrl(item.slug)
-    const detail = await fetchOpenNanaDetail(slug)
+  if (detailedItems.length > 0) {
+    console.log(`Fetching ${detailedItems.length} OpenNana prompt details...`)
 
-    if ((index + 1) % 20 === 0 || index === listItems.length - 1) {
-      console.log(`Fetched OpenNana details: ${index + 1}/${listItems.length}`)
-    }
+    const detailedCases = await mapWithConcurrency(
+      detailedItems,
+      OPENNANA_CONCURRENCY,
+      async (item, index) => {
+        const slug = normalizeUrl(item.slug)
+        const detail = await fetchOpenNanaDetail(slug)
 
-    return normalizeOpenNanaCase(item, detail)
-  })
+        if ((index + 1) % 20 === 0 || index === detailedItems.length - 1) {
+          console.log(`Fetched OpenNana details: ${index + 1}/${detailedItems.length}`)
+        }
 
-  return details.filter(Boolean).sort((left, right) => right.sortValue - left.sortValue)
+        return normalizeOpenNanaCase(item, detail)
+      },
+    )
+
+    detailedCases.forEach((item) => {
+      detailMap.set(item.slug, item)
+    })
+  }
+
+  return listItems
+    .map((item) => detailMap.get(normalizeUrl(item.slug)) || normalizeOpenNanaListCase(item))
+    .filter(Boolean)
+    .sort((left, right) => right.sortValue - left.sortValue)
 }
 
 async function main() {
-  const githubReadme = await download(GITHUB_README_URL)
-  const githubCases = parseGithubCases(githubReadme)
+  const githubCases = await fetchGithubCases()
   const opennanaCases = await fetchOpenNanaCases()
   const cases = [...opennanaCases, ...githubCases].sort((left, right) => right.sortValue - left.sortValue)
   const categories = unique(cases.map((item) => item.category)).sort((left, right) =>

@@ -97,6 +97,13 @@ function buildPlaygroundHref(prompt: string) {
   return url.toString()
 }
 
+function getGalleryColumnCount() {
+  if (typeof window === 'undefined') return 1
+  if (window.innerWidth >= 1280) return 3
+  if (window.innerWidth >= 768) return 2
+  return 1
+}
+
 function normalizePromptVariants(item: Record<string, unknown>, prompt: string) {
   const rawPrompts = Array.isArray(item.prompts) ? item.prompts : []
   const prompts = rawPrompts
@@ -568,14 +575,25 @@ export default function GalleryApp() {
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => getStoredGalleryFavoriteIds())
   const [batchStart, setBatchStart] = useState(0)
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_CASES)
-  const [showLoadMore, setShowLoadMore] = useState(false)
+  const [columnCount, setColumnCount] = useState(() => getGalleryColumnCount())
   const loadMoreTriggerRef = useRef<HTMLDivElement | null>(null)
+  const autoLoadReadyRef = useRef(true)
 
   const favoriteIdSet = useMemo(() => new Set(favoriteIds), [favoriteIds])
 
   useEffect(() => {
     saveGalleryFavoriteIds(favoriteIds)
   }, [favoriteIds])
+
+  useEffect(() => {
+    const handleResize = () => {
+      setColumnCount(getGalleryColumnCount())
+    }
+
+    handleResize()
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -682,7 +700,7 @@ export default function GalleryApp() {
   useEffect(() => {
     setBatchStart(0)
     setVisibleCount(INITIAL_VISIBLE_CASES)
-    setShowLoadMore(false)
+    autoLoadReadyRef.current = true
   }, [query, category, sourceFilter, favoriteOnly, sortMode])
 
   const visibleCases = useMemo(
@@ -701,33 +719,94 @@ export default function GalleryApp() {
       return nextStart >= filteredCases.length ? 0 : nextStart
     })
     setVisibleCount(INITIAL_VISIBLE_CASES)
-    setShowLoadMore(false)
+    autoLoadReadyRef.current = true
   }
 
   useEffect(() => {
-    if (!hasMoreCases) {
-      setShowLoadMore(false)
-      return undefined
-    }
+    if (!hasMoreCases) return undefined
 
     const target = loadMoreTriggerRef.current
     if (!target) return undefined
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setShowLoadMore(true)
+        const isIntersecting = entries.some((entry) => entry.isIntersecting)
+
+        if (!isIntersecting) {
+          autoLoadReadyRef.current = true
+          return
+        }
+
+        if (autoLoadReadyRef.current) {
+          autoLoadReadyRef.current = false
+          setVisibleCount((value) => Math.min(value + LOAD_MORE_BATCH_SIZE, filteredCases.length))
         }
       },
       {
-        rootMargin: '0px 0px 120px 0px',
+        rootMargin: '0px 0px 240px 0px',
         threshold: 0.1,
       },
     )
 
     observer.observe(target)
     return () => observer.disconnect()
-  }, [hasMoreCases, visibleCases.length])
+  }, [filteredCases.length, hasMoreCases, visibleCases.length])
+
+  const visibleCaseColumns = useMemo(() => {
+    const columns = Array.from({ length: columnCount }, () => [] as GalleryCase[])
+
+    visibleCases.forEach((item, index) => {
+      columns[index % columnCount].push(item)
+    })
+
+    return columns
+  }, [columnCount, visibleCases])
+
+  const renderCaseCard = (item: GalleryCase) => {
+    const previewImage = item.coverImage || item.images[0]
+    const isFavorite = favoriteIdSet.has(item.id)
+
+    return (
+      <article key={item.id} className="relative">
+        <button
+          onClick={() => setActiveCase(item)}
+          className="block w-full overflow-hidden rounded-3xl border border-gray-200 bg-white text-left shadow-sm transition-[transform,box-shadow,border-color] hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:border-white/[0.18]"
+          title={item.title}
+          aria-label={`鏌ョ湅 ${item.title} 璇︽儏`}
+        >
+          {previewImage ? (
+            <img
+              src={previewImage}
+              alt={item.title}
+              loading="lazy"
+              className="block w-full h-auto"
+            />
+          ) : (
+            <div className="flex min-h-[240px] items-center justify-center px-6 py-10 text-sm text-gray-400 dark:text-gray-500">
+              {item.title}
+            </div>
+          )}
+        </button>
+        <button
+          onClick={(event) => {
+            event.stopPropagation()
+            toggleFavorite(item.id)
+          }}
+          className={`absolute right-3 top-3 inline-flex h-10 w-10 items-center justify-center rounded-full border backdrop-blur transition ${
+            isFavorite
+              ? 'border-yellow-400/70 bg-yellow-400 text-white shadow-[0_10px_24px_rgba(250,204,21,0.35)]'
+              : 'border-white/20 bg-black/35 text-white hover:bg-black/50'
+          }`}
+          title={isFavorite ? '鍙栨秷鏀惰棌' : '鏀惰棌妗堜緥'}
+          aria-label={isFavorite ? '鍙栨秷鏀惰棌' : '鏀惰棌妗堜緥'}
+        >
+          <svg className="h-4 w-4" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+          </svg>
+        </button>
+      </article>
+    )
+  }
 
   const statItems = useMemo(() => {
     if (!payload) return []
@@ -868,7 +947,7 @@ export default function GalleryApp() {
               <button
                 onClick={handleRefreshBatch}
                 disabled={!hasMultipleBatches}
-                className="z-20 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-white/[0.06] md:w-auto"
+                className="z-20 order-last inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-white/[0.06] md:w-auto"
                 title="换一批"
               >
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -923,52 +1002,15 @@ export default function GalleryApp() {
 
             {!loading && !error && filteredCases.length > 0 && (
               <>
-                <div className="columns-1 gap-4 md:columns-2 xl:columns-3">
-                {visibleCases.map((item) => {
-                  const previewImage = item.coverImage || item.images[0]
-                  const isFavorite = favoriteIdSet.has(item.id)
-
-                  return (
-                    <article key={item.id} className="relative mb-4 break-inside-avoid">
-                      <button
-                        onClick={() => setActiveCase(item)}
-                        className="block w-full overflow-hidden rounded-3xl border border-gray-200 bg-white text-left shadow-sm transition-[transform,box-shadow,border-color] hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:border-white/[0.18]"
-                        title={item.title}
-                        aria-label={`查看 ${item.title} 详情`}
-                      >
-                        {previewImage ? (
-                          <img
-                            src={previewImage}
-                            alt={item.title}
-                            loading="lazy"
-                            className="block w-full h-auto"
-                          />
-                        ) : (
-                          <div className="flex min-h-[240px] items-center justify-center px-6 py-10 text-sm text-gray-400 dark:text-gray-500">
-                            {item.title}
-                          </div>
-                        )}
-                      </button>
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          toggleFavorite(item.id)
-                        }}
-                        className={`absolute right-3 top-3 inline-flex h-10 w-10 items-center justify-center rounded-full border backdrop-blur transition ${
-                          isFavorite
-                            ? 'border-yellow-400/70 bg-yellow-400 text-white shadow-[0_10px_24px_rgba(250,204,21,0.35)]'
-                            : 'border-white/20 bg-black/35 text-white hover:bg-black/50'
-                        }`}
-                        title={isFavorite ? '取消收藏' : '收藏案例'}
-                        aria-label={isFavorite ? '取消收藏' : '收藏案例'}
-                      >
-                        <svg className="h-4 w-4" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                        </svg>
-                      </button>
-                    </article>
-                  )
-                })}
+                <div
+                  className="grid items-start gap-4"
+                  style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}
+                >
+                  {visibleCaseColumns.map((column, columnIndex) => (
+                    <div key={`gallery-column-${columnIndex}`} className="space-y-4">
+                      {column.map(renderCaseCard)}
+                    </div>
+                  ))}
                 </div>
 
                 {hasMoreCases && (
@@ -976,18 +1018,9 @@ export default function GalleryApp() {
                     <p className="text-sm text-gray-500 dark:text-gray-400">
                       已显示 {visibleCases.length} / {filteredCases.length} 个案例
                     </p>
-                    {showLoadMore ? (
-                      <button
-                        onClick={() => setVisibleCount((value) => Math.min(value + LOAD_MORE_BATCH_SIZE, filteredCases.length))}
-                        className="rounded-2xl border border-gray-200 bg-white px-5 py-3 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-white/[0.06]"
-                      >
-                        加载更多
-                      </button>
-                    ) : (
-                      <div className="rounded-2xl border border-dashed border-gray-200 px-5 py-3 text-sm text-gray-400 dark:border-white/[0.08] dark:text-gray-500">
-                        滚动到底部后可加载更多
-                      </div>
-                    )}
+                    <div className="rounded-2xl border border-dashed border-gray-200 px-5 py-3 text-sm text-gray-400 dark:border-white/[0.08] dark:text-gray-500">
+                      滚动到底部后将自动加载更多
+                    </div>
                   </div>
                 )}
               </>
