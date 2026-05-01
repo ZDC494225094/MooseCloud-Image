@@ -1,0 +1,4 @@
+interface:
+  display_name: "MooseCloud Image Playground"
+  short_description: "Project guide for safe feature work in this repo"
+  default_prompt: "Use $moosecloud-image-playground to update this repo safely, starting from the project memory and validating the affected flow."
