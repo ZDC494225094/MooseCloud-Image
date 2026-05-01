@@ -749,22 +749,40 @@ export default function GalleryApp() {
       <article key={item.id} className="relative">
         <button
           onClick={() => setActiveCase(item)}
-          className="block w-full overflow-hidden rounded-3xl border border-gray-200 bg-white text-left shadow-sm transition-[transform,box-shadow,border-color] hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:border-white/[0.18]"
+          className="group block w-full overflow-hidden rounded-3xl border border-gray-200 bg-white text-left shadow-sm transition-[transform,box-shadow,border-color] hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:border-white/[0.18]"
           title={item.title}
           aria-label={`鏌ョ湅 ${item.title} 璇︽儏`}
         >
-          {previewImage ? (
-            <img
-              src={previewImage}
-              alt={item.title}
-              loading="lazy"
-              className="block w-full h-auto"
-            />
-          ) : (
-            <div className="flex min-h-[240px] items-center justify-center px-6 py-10 text-sm text-gray-400 dark:text-gray-500">
-              {item.title}
+          <div className="relative overflow-hidden">
+            {previewImage ? (
+              <img
+                src={previewImage}
+                alt={item.title}
+                loading="lazy"
+                className="block w-full h-auto transition-transform duration-300 group-hover:scale-[1.015]"
+              />
+            ) : (
+              <div className="flex min-h-[240px] items-center justify-center bg-gray-100 px-6 py-10 text-sm text-gray-400 dark:bg-gray-950 dark:text-gray-500">
+                {item.title}
+              </div>
+            )}
+
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/45 to-transparent px-4 pb-4 pt-12">
+              <div className="flex flex-wrap gap-2">
+                {(item.tags.length > 0 ? item.tags.slice(0, 3) : [getCategoryLabel(item.category)]).map((tag) => (
+                  <span
+                    key={`${item.id}-${tag}`}
+                    className="inline-flex items-center rounded-full border border-white/15 bg-white/12 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+              <h3 className="mt-3 line-clamp-2 text-base font-semibold leading-6 text-white drop-shadow-[0_1px_10px_rgba(0,0,0,0.35)] sm:text-lg">
+                {item.title}
+              </h3>
             </div>
-          )}
+          </div>
         </button>
         <button
           onClick={(event) => {
