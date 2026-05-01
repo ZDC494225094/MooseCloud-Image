@@ -35,6 +35,8 @@ export default function DetailModal() {
   const [imageSizes, setImageSizes] = useState<Record<string, string>>({})
   const [maskPreviewSrc, setMaskPreviewSrc] = useState('')
   const [now, setNow] = useState(Date.now())
+  const [promptExpanded, setPromptExpanded] = useState(false)
+  const [revisedPromptExpanded, setRevisedPromptExpanded] = useState(false)
   const imagePanelRef = useRef<HTMLDivElement>(null)
   const mainImageRef = useRef<HTMLImageElement>(null)
   const [imageLabelLeft, setImageLabelLeft] = useState(8)
@@ -48,6 +50,8 @@ export default function DetailModal() {
 
   useEffect(() => {
     setImageIndex(0)
+    setPromptExpanded(false)
+    setRevisedPromptExpanded(false)
   }, [detailTaskId])
 
   useEffect(() => {
@@ -495,15 +499,62 @@ export default function DetailModal() {
                 </span>
               )}
             </div>
-            <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap mb-4">
-              {task.prompt || '(无提示词)'}
-            </p>
+            <div className="mb-4">
+              <div
+                className={`overflow-y-auto text-sm leading-relaxed text-gray-700 transition-[max-height] duration-200 dark:text-gray-300 ${
+                  promptExpanded ? 'max-h-56' : 'max-h-[4.5rem]'
+                }`}
+                style={
+                  promptExpanded
+                    ? { whiteSpace: 'pre-wrap' }
+                    : {
+                        whiteSpace: 'pre-wrap',
+                        display: '-webkit-box',
+                        WebkitBoxOrient: 'vertical',
+                        WebkitLineClamp: 3,
+                      }
+                }
+              >
+                {task.prompt || '(无提示词)'}
+              </div>
+              {task.prompt && (
+                <button
+                  type="button"
+                  onClick={() => setPromptExpanded((value) => !value)}
+                  className="mt-2 text-xs font-medium text-blue-600 transition hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+                >
+                  {promptExpanded ? '收起提示词' : '展开全部'}
+                </button>
+              )}
+            </div>
             {showRevisedPrompt && currentRevisedPrompt && (
               <div className="mb-4">
-                <ActualValueBadge
-                  value={currentRevisedPrompt}
-                  className="max-w-full rounded px-2 py-1 text-left text-xs leading-relaxed whitespace-pre-wrap"
-                />
+                <div
+                  className={`overflow-y-auto transition-[max-height] duration-200 ${
+                    revisedPromptExpanded ? 'max-h-56' : 'max-h-[4.5rem]'
+                  }`}
+                  style={
+                    revisedPromptExpanded
+                      ? {}
+                      : {
+                          display: '-webkit-box',
+                          WebkitBoxOrient: 'vertical',
+                          WebkitLineClamp: 3,
+                        }
+                  }
+                >
+                  <ActualValueBadge
+                    value={currentRevisedPrompt}
+                    className="max-w-full rounded px-2 py-1 text-left text-xs leading-relaxed whitespace-pre-wrap"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRevisedPromptExpanded((value) => !value)}
+                  className="mt-2 text-xs font-medium text-blue-600 transition hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+                >
+                  {revisedPromptExpanded ? '收起响应值' : '展开响应值'}
+                </button>
               </div>
             )}
 
@@ -593,38 +644,44 @@ export default function DetailModal() {
             </div>
           </div>
 
-          <div className="grid grid-cols-4 sm:flex gap-2 pt-4 border-t border-gray-100 dark:border-white/[0.08]">
+          <div className="grid grid-cols-4 gap-2 pt-4 border-t border-gray-100 dark:border-white/[0.08] sm:flex">
             <button
               onClick={handleReuse}
-              className="col-span-2 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-500/20 transition text-sm font-medium whitespace-nowrap"
+              className="col-span-1 flex items-center justify-center gap-1 px-2 py-2 rounded-xl bg-blue-50 text-xs font-medium text-blue-600 transition whitespace-nowrap hover:bg-blue-100 dark:bg-blue-500/10 dark:text-blue-400 dark:hover:bg-blue-500/20 sm:flex-1 sm:gap-1.5 sm:px-3 sm:text-sm"
+              aria-label="复用配置"
             >
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
               </svg>
-              复用配置
+              <span className="sm:hidden">复用</span>
+              <span className="hidden sm:inline">复用配置</span>
             </button>
             <button
               onClick={handleEdit}
               disabled={!outputLen}
-              className="col-span-2 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-green-50 dark:bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-sm font-medium whitespace-nowrap"
+              className="col-span-1 flex items-center justify-center gap-1 px-2 py-2 rounded-xl bg-green-50 text-xs font-medium text-green-600 transition whitespace-nowrap hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-green-500/10 dark:text-green-400 dark:hover:bg-green-500/20 sm:flex-1 sm:gap-1.5 sm:px-3 sm:text-sm"
+              aria-label="编辑输出"
             >
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
-              编辑输出
+              <span className="sm:hidden">编辑</span>
+              <span className="hidden sm:inline">编辑输出</span>
             </button>
             <button
               onClick={handleDelete}
-              className="col-span-3 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition text-sm font-medium whitespace-nowrap"
+              className="col-span-1 flex items-center justify-center gap-1 px-2 py-2 rounded-xl bg-red-50 text-xs font-medium text-red-600 transition whitespace-nowrap hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20 sm:flex-1 sm:gap-1.5 sm:px-3 sm:text-sm"
+              aria-label="删除记录"
             >
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
-              删除记录
+              <span className="sm:hidden">删除</span>
+              <span className="hidden sm:inline">删除记录</span>
             </button>
             <button
               onClick={handleToggleFavorite}
-              className={`col-span-1 sm:flex-none sm:w-11 w-full flex items-center justify-center rounded-xl transition ${
+              className={`col-span-1 flex w-full items-center justify-center rounded-xl transition sm:flex-none sm:w-11 ${
                 task.isFavorite
                   ? 'bg-yellow-50 text-yellow-500 hover:bg-yellow-100 dark:bg-yellow-500/10 dark:hover:bg-yellow-500/20'
                   : 'bg-gray-50 text-gray-400 hover:bg-yellow-50 hover:text-yellow-500 dark:bg-white/[0.04] dark:hover:bg-yellow-500/10'
