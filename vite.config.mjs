@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
+import { handleStorageSaveRequest, tryServeStoredImageRequest } from './storageProxy.mjs'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const DEFAULT_PROXY_PREFIX = '/api-proxy'
@@ -63,11 +64,37 @@ function loadDevProxyConfig() {
   }
 }
 
+function storageProxyPlugin() {
+  return {
+    name: 'local-storage-proxy',
+    configureServer(server) {
+      server.middlewares.use(async (request, response, next) => {
+        try {
+          const requestUrl = request.url || '/'
+
+          if (request.method === 'POST' && requestUrl.split('?')[0] === '/api/storage/save') {
+            await handleStorageSaveRequest(request, response)
+            return
+          }
+
+          if (await tryServeStoredImageRequest(requestUrl, response)) {
+            return
+          }
+
+          next()
+        } catch (error) {
+          next(error)
+        }
+      })
+    },
+  }
+}
+
 export default defineConfig(({ command }) => {
   const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
 
   return {
-    plugins: [react()],
+    plugins: [storageProxyPlugin(), react()],
     base: './',
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import App from './App'
 import GalleryApp from './gallery/GalleryApp'
-import { initStore, useStore } from './store'
+import { createInputImageFromUrl, initStore, useStore } from './store'
 import { normalizeBaseUrl } from './lib/api'
 import type { ApiMode } from './types'
 
 type AppView = 'gallery' | 'playground'
 const RESUME_ACTIVE_TASKS_KEY = 'gpt-image-playground:resume-active-tasks'
+const GALLERY_VIEW_STATE_KEY = 'gpt-image-playground:gallery-view-state'
 
 function getAppViewFromPathname(pathname: string): AppView {
   return pathname.endsWith('/playground.html') ? 'playground' : 'gallery'
@@ -21,10 +22,25 @@ function isInternalAppUrl(url: URL): boolean {
   )
 }
 
-function navigateTo(url: URL, onChange: (view: AppView) => void) {
+function saveGalleryScrollPosition(scrollY: number) {
+  try {
+    const raw = window.sessionStorage.getItem(GALLERY_VIEW_STATE_KEY)
+    const nextState = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+    nextState.scrollY = Math.max(0, Math.trunc(scrollY))
+    window.sessionStorage.setItem(GALLERY_VIEW_STATE_KEY, JSON.stringify(nextState))
+  } catch {
+    /* ignore */
+  }
+}
+
+function navigateTo(url: URL, currentView: AppView, onChange: (view: AppView) => void) {
   const nextHref = `${url.pathname}${url.search}${url.hash}`
   const currentHref = `${window.location.pathname}${window.location.search}${window.location.hash}`
   if (nextHref === currentHref) return
+
+  if (currentView === 'gallery' && getAppViewFromPathname(url.pathname) !== 'gallery') {
+    saveGalleryScrollPosition(window.scrollY)
+  }
 
   window.history.pushState(null, '', nextHref)
   window.scrollTo({ top: 0, behavior: 'auto' })
@@ -36,6 +52,9 @@ function applyPlaygroundUrlState(
   search: string,
   setSettings: ReturnType<typeof useStore.getState>['setSettings'],
   setPrompt: ReturnType<typeof useStore.getState>['setPrompt'],
+  setInputImages: ReturnType<typeof useStore.getState>['setInputImages'],
+  setPendingImportedInputImageCount: ReturnType<typeof useStore.getState>['setPendingImportedInputImageCount'],
+  clearMaskDraft: ReturnType<typeof useStore.getState>['clearMaskDraft'],
 ) {
   if (getAppViewFromPathname(pathname) !== 'playground') return
 
@@ -71,18 +90,46 @@ function applyPlaygroundUrlState(
     setPrompt(promptParam)
   }
 
+  const referenceImageParams = searchParams
+    .getAll('referenceImage')
+    .map((value) => value.trim())
+    .filter(Boolean)
+
+  if (referenceImageParams.length > 0) {
+    const nextCount = Math.min(referenceImageParams.length, 16)
+    clearMaskDraft()
+    setInputImages([])
+    setPendingImportedInputImageCount(nextCount)
+
+    void (async () => {
+      try {
+        const images = await Promise.all(
+          referenceImageParams.slice(0, nextCount).map((value) => createInputImageFromUrl(value)),
+        )
+        setInputImages(images)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        useStore.getState().showToast(`案例图片带入失败：${message}`, 'error')
+      } finally {
+        setPendingImportedInputImageCount(0)
+      }
+    })()
+  }
+
   if (
     searchParams.has('apiUrl') ||
     searchParams.has('apiKey') ||
     searchParams.has('codexCli') ||
     searchParams.has('apiMode') ||
-    searchParams.has('prompt')
+    searchParams.has('prompt') ||
+    searchParams.has('referenceImage')
   ) {
     searchParams.delete('apiUrl')
     searchParams.delete('apiKey')
     searchParams.delete('codexCli')
     searchParams.delete('apiMode')
     searchParams.delete('prompt')
+    searchParams.delete('referenceImage')
 
     const nextSearch = searchParams.toString()
     const nextUrl = `${pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`
@@ -93,6 +140,9 @@ function applyPlaygroundUrlState(
 export default function RootApp() {
   const setSettings = useStore((state) => state.setSettings)
   const setPrompt = useStore((state) => state.setPrompt)
+  const setInputImages = useStore((state) => state.setInputImages)
+  const setPendingImportedInputImageCount = useStore((state) => state.setPendingImportedInputImageCount)
+  const clearMaskDraft = useStore((state) => state.clearMaskDraft)
   const [view, setView] = useState<AppView>(() => getAppViewFromPathname(window.location.pathname))
   const didInitStoreRef = useRef(false)
 
@@ -110,8 +160,16 @@ export default function RootApp() {
   }, [])
 
   useEffect(() => {
-    applyPlaygroundUrlState(window.location.pathname, window.location.search, setSettings, setPrompt)
-  }, [setPrompt, setSettings, view])
+    applyPlaygroundUrlState(
+      window.location.pathname,
+      window.location.search,
+      setSettings,
+      setPrompt,
+      setInputImages,
+      setPendingImportedInputImageCount,
+      clearMaskDraft,
+    )
+  }, [clearMaskDraft, setInputImages, setPendingImportedInputImageCount, setPrompt, setSettings, view])
 
   useEffect(() => {
     const markForResume = () => {
@@ -156,7 +214,7 @@ export default function RootApp() {
       if (!isInternalAppUrl(url)) return
 
       event.preventDefault()
-      navigateTo(url, setView)
+      navigateTo(url, view, setView)
     }
 
     window.addEventListener('popstate', handlePopState)
@@ -165,7 +223,7 @@ export default function RootApp() {
       window.removeEventListener('popstate', handlePopState)
       document.removeEventListener('click', handleDocumentClick)
     }
-  }, [])
+  }, [view])
 
   const content = useMemo(() => (
     view === 'playground' ? <App /> : <GalleryApp />

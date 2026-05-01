@@ -55,14 +55,30 @@ interface GalleryPayload {
 
 type SortMode = 'latest' | 'oldest' | 'title' | 'promptLength'
 
+interface GalleryViewState {
+  query: string
+  category: string
+  sourceFilter: string
+  favoriteOnly: boolean
+  sortMode: SortMode
+  batchStart: number
+  visibleCount: number
+  scrollY: number
+}
+
 const INITIAL_VISIBLE_CASES = 24
 const LOAD_MORE_BATCH_SIZE = 18
+const GALLERY_DATA_CACHE_NAME = `gpt-image-playground:gallery-data:${__APP_VERSION__}`
+const GALLERY_DATA_CACHE_REQUEST = './data/cases.json'
+const GALLERY_VIEW_STATE_KEY = 'gpt-image-playground:gallery-view-state'
 const NAV_BUTTON_CLASS_NAME =
   'rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
 const ACTIVE_FAVORITE_BUTTON_CLASS_NAME =
   'border-yellow-400 bg-yellow-50 text-yellow-500 dark:bg-yellow-500/10 dark:text-yellow-400'
 const INACTIVE_FAVORITE_BUTTON_CLASS_NAME =
   'border-gray-200 bg-white text-gray-400 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
+
+let galleryPayloadMemoryCache: GalleryPayload | null = null
 
 const CATEGORY_LABELS: Record<string, string> = {
   'Ad Creative Cases': '广告创意案例',
@@ -100,9 +116,10 @@ function getCategoryLabel(category: string) {
   return CATEGORY_LABELS[normalizedCategory] || normalizedCategory || '未分类'
 }
 
-function buildPlaygroundHref(prompt: string) {
+function buildPlaygroundHref(prompt: string, referenceImage?: string) {
   const url = new URL('./playground.html', window.location.href)
   if (prompt.trim()) url.searchParams.set('prompt', prompt)
+  if (referenceImage?.trim()) url.searchParams.append('referenceImage', referenceImage)
   return url.toString()
 }
 
@@ -111,6 +128,69 @@ function getGalleryColumnCount() {
   if (window.innerWidth >= 1280) return 3
   if (window.innerWidth >= 768) return 2
   return 1
+}
+
+function createDefaultGalleryViewState(): GalleryViewState {
+  return {
+    query: '',
+    category: 'all',
+    sourceFilter: 'all',
+    favoriteOnly: false,
+    sortMode: 'latest',
+    batchStart: 0,
+    visibleCount: INITIAL_VISIBLE_CASES,
+    scrollY: 0,
+  }
+}
+
+function readStoredGalleryViewState(): GalleryViewState {
+  const fallback = createDefaultGalleryViewState()
+
+  if (typeof window === 'undefined') return fallback
+
+  try {
+    const raw = window.sessionStorage.getItem(GALLERY_VIEW_STATE_KEY)
+    if (!raw) return fallback
+
+    const parsed = JSON.parse(raw) as Partial<GalleryViewState>
+    return {
+      query: typeof parsed.query === 'string' ? parsed.query : fallback.query,
+      category: typeof parsed.category === 'string' ? parsed.category : fallback.category,
+      sourceFilter: typeof parsed.sourceFilter === 'string' ? parsed.sourceFilter : fallback.sourceFilter,
+      favoriteOnly: parsed.favoriteOnly === true,
+      sortMode:
+        parsed.sortMode === 'latest' ||
+        parsed.sortMode === 'oldest' ||
+        parsed.sortMode === 'title' ||
+        parsed.sortMode === 'promptLength'
+          ? parsed.sortMode
+          : fallback.sortMode,
+      batchStart:
+        typeof parsed.batchStart === 'number' && Number.isFinite(parsed.batchStart)
+          ? Math.max(0, Math.trunc(parsed.batchStart))
+          : fallback.batchStart,
+      visibleCount:
+        typeof parsed.visibleCount === 'number' && Number.isFinite(parsed.visibleCount)
+          ? Math.max(INITIAL_VISIBLE_CASES, Math.trunc(parsed.visibleCount))
+          : fallback.visibleCount,
+      scrollY:
+        typeof parsed.scrollY === 'number' && Number.isFinite(parsed.scrollY)
+          ? Math.max(0, Math.trunc(parsed.scrollY))
+          : fallback.scrollY,
+    }
+  } catch {
+    return fallback
+  }
+}
+
+function writeStoredGalleryViewState(state: GalleryViewState) {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.sessionStorage.setItem(GALLERY_VIEW_STATE_KEY, JSON.stringify(state))
+  } catch {
+    /* ignore */
+  }
 }
 
 function normalizePromptVariants(item: Record<string, unknown>, prompt: string) {
@@ -249,6 +329,43 @@ function normalizePayload(input: GalleryPayload) {
   } satisfies GalleryPayload
 }
 
+async function readCachedGalleryPayload() {
+  if (galleryPayloadMemoryCache) return galleryPayloadMemoryCache
+  if (typeof window === 'undefined' || !('caches' in window)) return null
+
+  try {
+    const cache = await window.caches.open(GALLERY_DATA_CACHE_NAME)
+    const response = await cache.match(GALLERY_DATA_CACHE_REQUEST)
+    if (!response?.ok) return null
+
+    const payload = normalizePayload((await response.json()) as GalleryPayload)
+    galleryPayloadMemoryCache = payload
+    return payload
+  } catch {
+    return null
+  }
+}
+
+async function fetchLatestGalleryPayload() {
+  const response = await fetch(GALLERY_DATA_CACHE_REQUEST, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+  const cacheableResponse = response.clone()
+  const payload = normalizePayload((await response.json()) as GalleryPayload)
+  galleryPayloadMemoryCache = payload
+
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(GALLERY_DATA_CACHE_NAME)
+      await cache.put(GALLERY_DATA_CACHE_REQUEST, cacheableResponse)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return payload
+}
+
 async function copyToClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -348,7 +465,7 @@ function GalleryCaseModal({
                 </span>
               </button>
               <a
-                href={buildPlaygroundHref(item.prompt)}
+                href={buildPlaygroundHref(item.prompt, currentImage)}
                 className="inline-flex h-10 items-center justify-center rounded-xl bg-blue-600 px-3 text-sm font-medium text-white transition-colors hover:bg-blue-500 sm:py-2"
               >
                 <span className="sm:hidden">创作</span>
@@ -455,7 +572,7 @@ function GalleryCaseModal({
                     </p>
                   </div>
                   <a
-                    href={buildPlaygroundHref(item.prompt)}
+                    href={buildPlaygroundHref(item.prompt, currentImage)}
                     className="rounded-xl border border-gray-200 px-3 py-2 text-xs transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:hover:bg-white/[0.06]"
                   >
                     使用主提示词
@@ -542,21 +659,25 @@ function GalleryCaseModal({
 }
 
 export default function GalleryApp() {
-  const [payload, setPayload] = useState<GalleryPayload | null>(null)
-  const [loading, setLoading] = useState(true)
+  const initialViewStateRef = useRef<GalleryViewState>(readStoredGalleryViewState())
+  const [payload, setPayload] = useState<GalleryPayload | null>(() => galleryPayloadMemoryCache)
+  const [loading, setLoading] = useState(() => galleryPayloadMemoryCache == null)
   const [error, setError] = useState('')
-  const [query, setQuery] = useState('')
-  const [category, setCategory] = useState('all')
-  const [sourceFilter, setSourceFilter] = useState('all')
-  const [favoriteOnly, setFavoriteOnly] = useState(false)
-  const [sortMode, setSortMode] = useState<SortMode>('latest')
+  const [query, setQuery] = useState(() => initialViewStateRef.current.query)
+  const [category, setCategory] = useState(() => initialViewStateRef.current.category)
+  const [sourceFilter, setSourceFilter] = useState(() => initialViewStateRef.current.sourceFilter)
+  const [favoriteOnly, setFavoriteOnly] = useState(() => initialViewStateRef.current.favoriteOnly)
+  const [sortMode, setSortMode] = useState<SortMode>(() => initialViewStateRef.current.sortMode)
   const [activeCase, setActiveCase] = useState<GalleryCase | null>(null)
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => getStoredGalleryFavoriteIds())
-  const [batchStart, setBatchStart] = useState(0)
-  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_CASES)
+  const [batchStart, setBatchStart] = useState(() => initialViewStateRef.current.batchStart)
+  const [visibleCount, setVisibleCount] = useState(() => initialViewStateRef.current.visibleCount)
   const [columnCount, setColumnCount] = useState(() => getGalleryColumnCount())
   const loadMoreTriggerRef = useRef<HTMLDivElement | null>(null)
   const autoLoadReadyRef = useRef(true)
+  const didMountFilterResetRef = useRef(false)
+  const restoredScrollRef = useRef(false)
+  const latestScrollYRef = useRef(initialViewStateRef.current.scrollY)
 
   const favoriteIdSet = useMemo(() => new Set(favoriteIds), [favoriteIds])
 
@@ -578,19 +699,28 @@ export default function GalleryApp() {
     let alive = true
 
     const load = async () => {
-      try {
-        setLoading(true)
-        const response = await fetch('./data/cases.json', { cache: 'no-store' })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const cachedPayload = await readCachedGalleryPayload()
+      if (alive && cachedPayload) {
+        setPayload(cachedPayload)
+        setError('')
+        setLoading(false)
+      }
 
-        const json = (await response.json()) as GalleryPayload
+      try {
+        if (!cachedPayload) {
+          setLoading(true)
+        }
+
+        const nextPayload = await fetchLatestGalleryPayload()
         if (!alive) return
 
-        setPayload(normalizePayload(json))
+        setPayload(nextPayload)
         setError('')
       } catch (err) {
         if (!alive) return
-        setError(err instanceof Error ? err.message : String(err))
+        if (!cachedPayload) {
+          setError(err instanceof Error ? err.message : String(err))
+        }
       } finally {
         if (alive) setLoading(false)
       }
@@ -602,6 +732,47 @@ export default function GalleryApp() {
       alive = false
     }
   }, [])
+
+  useEffect(() => {
+    const handleScroll = () => {
+      latestScrollYRef.current = window.scrollY
+    }
+
+    const persistState = () => {
+      writeStoredGalleryViewState({
+        query,
+        category,
+        sourceFilter,
+        favoriteOnly,
+        sortMode,
+        batchStart,
+        visibleCount,
+        scrollY: latestScrollYRef.current,
+      })
+    }
+
+    window.addEventListener('scroll', handleScroll, { passive: true })
+    window.addEventListener('beforeunload', persistState)
+    window.addEventListener('pagehide', persistState)
+    return () => {
+      window.removeEventListener('scroll', handleScroll)
+      window.removeEventListener('beforeunload', persistState)
+      window.removeEventListener('pagehide', persistState)
+    }
+  }, [batchStart, category, favoriteOnly, query, sortMode, sourceFilter, visibleCount])
+
+  useEffect(() => {
+    writeStoredGalleryViewState({
+      query,
+      category,
+      sourceFilter,
+      favoriteOnly,
+      sortMode,
+      batchStart,
+      visibleCount,
+      scrollY: latestScrollYRef.current,
+    })
+  }, [batchStart, category, favoriteOnly, query, sortMode, sourceFilter, visibleCount])
 
   const categories = useMemo(() => {
     const sourceCategories = payload?.categories || []
@@ -677,6 +848,11 @@ export default function GalleryApp() {
   }, [payload, query, category, sourceFilter, favoriteOnly, favoriteIdSet, sortMode])
 
   useEffect(() => {
+    if (!didMountFilterResetRef.current) {
+      didMountFilterResetRef.current = true
+      return
+    }
+
     setBatchStart(0)
     setVisibleCount(INITIAL_VISIBLE_CASES)
     autoLoadReadyRef.current = true
@@ -689,6 +865,22 @@ export default function GalleryApp() {
 
   const hasMoreCases = batchStart + visibleCount < filteredCases.length
   const hasMultipleBatches = filteredCases.length > INITIAL_VISIBLE_CASES
+
+  useEffect(() => {
+    if (restoredScrollRef.current || loading || Boolean(error)) return
+
+    restoredScrollRef.current = true
+    const nextScrollY = initialViewStateRef.current.scrollY
+    if (nextScrollY <= 0) return
+
+    let frameId = window.requestAnimationFrame(() => {
+      frameId = window.requestAnimationFrame(() => {
+        window.scrollTo({ top: nextScrollY, behavior: 'auto' })
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [error, loading, visibleCases.length])
 
   const handleRefreshBatch = () => {
     if (!hasMultipleBatches) return

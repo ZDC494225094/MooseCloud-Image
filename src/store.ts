@@ -179,6 +179,62 @@ async function fetchImageAsDataUrl(src: string): Promise<string> {
   return blobToDataUrl(await response.blob())
 }
 
+async function fetchImageBlobWithProxyFallback(src: string): Promise<Blob> {
+  try {
+    const response = await fetch(src, { cache: 'no-store' })
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    return await response.blob()
+  } catch (directError) {
+    let resolvedUrl: URL
+    try {
+      resolvedUrl = new URL(src, window.location.href)
+    } catch {
+      throw directError
+    }
+
+    if (!/^https?:$/i.test(resolvedUrl.protocol) || resolvedUrl.origin === window.location.origin) {
+      throw directError
+    }
+
+    const proxyResponse = await fetch('/api/storage/save', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'url',
+        url: resolvedUrl.toString(),
+      }),
+    })
+
+    if (!proxyResponse.ok) {
+      let detail = `HTTP ${proxyResponse.status}`
+      try {
+        const payload = await proxyResponse.json() as { error?: string }
+        if (payload?.error) detail = payload.error
+      } catch {
+        /* ignore */
+      }
+      throw new Error(`本地代理抓取失败: ${detail}`)
+    }
+
+    const proxyPayload = await proxyResponse.json() as { url?: string }
+    if (!proxyPayload.url) {
+      throw new Error('本地代理未返回图片地址')
+    }
+
+    const storedResponse = await fetch(proxyPayload.url, { cache: 'no-store' })
+    if (!storedResponse.ok) {
+      throw new Error(`代理图片读取失败: HTTP ${storedResponse.status}`)
+    }
+
+    return await storedResponse.blob()
+  }
+}
+
 export async function ensureImageDataUrl(id: string): Promise<string | undefined> {
   const cached = imageDataUrlCache.get(id)
   if (cached) return cached
@@ -293,6 +349,8 @@ interface AppState {
   removeInputImage: (idx: number) => void
   clearInputImages: () => void
   setInputImages: (imgs: InputImage[]) => void
+  pendingImportedInputImageCount: number
+  setPendingImportedInputImageCount: (count: number) => void
   moveInputImage: (fromIdx: number, toIdx: number) => void
   maskDraft: MaskDraft | null
   setMaskDraft: (draft: MaskDraft | null) => void
@@ -393,7 +451,12 @@ export const useStore = create<AppState>()(
       clearInputImages: () =>
         set((s) => {
           for (const img of s.inputImages) clearCachedImage(img.id)
-          return { inputImages: [], maskDraft: null, maskEditorImageId: null }
+          return {
+            inputImages: [],
+            pendingImportedInputImageCount: 0,
+            maskDraft: null,
+            maskEditorImageId: null,
+          }
         }),
       setInputImages: (imgs) =>
         set((s) => {
@@ -402,9 +465,13 @@ export const useStore = create<AppState>()(
             Boolean(s.maskDraft) && !inputImages.some((img) => img.id === s.maskDraft?.targetImageId)
           return {
             inputImages,
+            pendingImportedInputImageCount: 0,
             ...(shouldClearMask ? { maskDraft: null, maskEditorImageId: null } : {}),
           }
         }),
+      pendingImportedInputImageCount: 0,
+      setPendingImportedInputImageCount: (pendingImportedInputImageCount) =>
+        set({ pendingImportedInputImageCount: Math.max(0, Math.trunc(pendingImportedInputImageCount)) }),
       moveInputImage: (fromIdx, toIdx) =>
         set((s) => {
           const images = [...s.inputImages]
@@ -1283,6 +1350,18 @@ export async function addImageFromFile(file: File): Promise<void> {
   setLimitedCache(imagePreviewSrcCache, id, dataUrl, PREVIEW_IMAGE_CACHE_LIMIT)
   setLimitedCache(imageDataUrlCache, id, dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
   useStore.getState().addInputImage({ id, dataUrl })
+}
+
+export async function createInputImageFromUrl(src: string): Promise<InputImage> {
+  const blob = await fetchImageBlobWithProxyFallback(src)
+  if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
+
+  const dataUrl = await blobToDataUrl(blob)
+  const id = await hashDataUrl(dataUrl)
+  setLimitedCache(imageFullSrcCache, id, dataUrl, FULL_IMAGE_CACHE_LIMIT)
+  setLimitedCache(imagePreviewSrcCache, id, dataUrl, PREVIEW_IMAGE_CACHE_LIMIT)
+  setLimitedCache(imageDataUrlCache, id, dataUrl, IMAGE_DATA_URL_CACHE_LIMIT)
+  return { id, dataUrl }
 }
 
 /** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */

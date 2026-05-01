@@ -34,6 +34,7 @@ export default function InputBar() {
   const prompt = useStore((s) => s.prompt)
   const setPrompt = useStore((s) => s.setPrompt)
   const inputImages = useStore((s) => s.inputImages)
+  const pendingImportedInputImageCount = useStore((s) => s.pendingImportedInputImageCount)
   const removeInputImage = useStore((s) => s.removeInputImage)
   const clearInputImages = useStore((s) => s.clearInputImages)
   const params = useStore((s) => s.params)
@@ -146,6 +147,7 @@ export default function InputBar() {
   const [nInput, setNInput] = useState(String(params.n))
   const dragCounter = useRef(0)
   const isMobile = useIsMobile()
+  const isImportingGalleryImages = pendingImportedInputImageCount > 0
 
   const atImageLimit = inputImages.length >= API_MAX_IMAGES
   const maskTargetImage = maskDraft
@@ -878,6 +880,27 @@ export default function InputBar() {
     )
   }
 
+  const renderPendingImportedImageThumbs = () => (
+    <div ref={imagesRef} className="mb-3">
+      <div className="grid grid-cols-[repeat(auto-fill,52px)] justify-between gap-x-2 gap-y-3">
+        {Array.from({ length: pendingImportedInputImageCount }).map((_, idx) => (
+          <div
+            key={`pending-import-${idx}`}
+            className="relative h-[52px] w-[52px] overflow-hidden rounded-xl border border-dashed border-blue-200 bg-blue-50/80 shadow-sm dark:border-blue-400/30 dark:bg-blue-500/10"
+          >
+            <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-blue-100 via-white to-blue-100 dark:from-blue-500/10 dark:via-white/[0.08] dark:to-blue-500/10" />
+            <div className="absolute inset-0 flex items-center justify-center text-[9px] font-medium tracking-wide text-blue-500 dark:text-blue-300">
+              加载中
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-blue-500 dark:text-blue-300">
+        正在从画廊带入 {pendingImportedInputImageCount} 张图片...
+      </p>
+    </div>
+  )
+
   const renderParams = (cols: string) => (
     <div className={`grid ${cols} gap-2 text-xs flex-1`}>
       <label className="flex flex-col gap-0.5">
@@ -1123,12 +1146,14 @@ export default function InputBar() {
           </div>
 
           {/* 输入图片行（移动端可折叠） */}
-          {inputImages.length > 0 && (
+          {(inputImages.length > 0 || isImportingGalleryImages) && (
             isMobile ? (
               <>
                 <div className={`collapse-section${mobileCollapsed ? ' collapsed' : ''}`}>
                   <div className="collapse-inner">
-                    {renderImageThumbs()}
+                    {isImportingGalleryImages && inputImages.length === 0
+                      ? renderPendingImportedImageThumbs()
+                      : renderImageThumbs()}
                   </div>
                 </div>
                 {mobileCollapsed && (
@@ -1138,7 +1163,9 @@ export default function InputBar() {
                 )}
               </>
             ) : (
-              renderImageThumbs()
+              isImportingGalleryImages && inputImages.length === 0
+                ? renderPendingImportedImageThumbs()
+                : renderImageThumbs()
             )
           )}
 
