@@ -71,6 +71,10 @@ const CATEGORY_LABELS: Record<string, string> = {
   'Portrait & Photography Cases': '人像摄影案例',
   'Poster & Illustration Cases': '海报插画案例',
   'UI & Social Media Mockup Cases': 'UI 与社媒案例',
+  ChatGPT: 'ChatGPT 案例',
+  'Nano Banana 2': 'Nano Banana 2 案例',
+  'Nano banana pro': 'Nano Banana Pro 案例',
+  OpenNana: 'OpenNana 案例',
 }
 
 function unique(values: string[]) {
@@ -87,8 +91,13 @@ function formatDate(value: string) {
   }).format(date)
 }
 
+function normalizeCategoryKey(category: string) {
+  return category.replace(/^[^\p{L}\p{N}]+/u, '').trim()
+}
+
 function getCategoryLabel(category: string) {
-  return CATEGORY_LABELS[category] || category || '未分类'
+  const normalizedCategory = normalizeCategoryKey(category)
+  return CATEGORY_LABELS[normalizedCategory] || normalizedCategory || '未分类'
 }
 
 function buildPlaygroundHref(prompt: string) {
@@ -301,16 +310,6 @@ function GalleryCaseModal({
 
   const currentImage = item.images[imageIndex] || item.coverImage
   const canNavigate = item.images.length > 1
-  const sourceLinks = [
-    { label: '来源页面', href: item.sourceItemUrl },
-    { label: '原始来源', href: item.externalSourceUrl },
-    { label: '作者主页', href: item.authorUrl },
-  ].filter(
-    (entry, index, list) =>
-      entry.href.trim() &&
-      list.findIndex((candidate) => candidate.href.trim() === entry.href.trim()) === index,
-  )
-
   return (
     <>
       <div
@@ -524,28 +523,8 @@ function GalleryCaseModal({
                 </div>
               </div>
 
-              <DetailMeta label="来源" value={item.sourceLabel} />
               <DetailMeta label="作者 / 来源账号" value={item.sourceName} />
               <DetailMeta label="分类" value={getCategoryLabel(item.category)} />
-
-              {sourceLinks.length > 0 && (
-                <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-white/[0.08] dark:bg-gray-900">
-                  <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">相关链接</h3>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {sourceLinks.map((entry) => (
-                      <a
-                        key={`${entry.label}-${entry.href}`}
-                        href={entry.href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-950 dark:hover:bg-white/[0.06]"
-                      >
-                        {entry.label}
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              )}
             </section>
           </div>
         </div>
@@ -854,11 +833,9 @@ export default function GalleryApp() {
               <div className="max-w-3xl">
                 <p className="text-xs uppercase tracking-[0.18em] text-blue-500">Image-First Gallery</p>
                 <h2 className="mt-3 text-3xl font-bold tracking-tight text-gray-900 dark:text-gray-100 sm:text-4xl">
-                  MooseCloud-创意画廊
+                  创意画廊
                 </h2>
-                <p className="mt-4 text-sm leading-7 text-gray-600 dark:text-gray-400 sm:text-base">
-                  画廊列表只展示图片，按图片原始高宽比铺陈，不做裁剪。打开详情后再查看提示词、来源、标签和跳转链接。
-                </p>
+             
               </div>
 
               <div className="flex flex-wrap gap-2">
