@@ -179,6 +179,38 @@ async function fetchImageAsDataUrl(src: string): Promise<string> {
   return blobToDataUrl(await response.blob())
 }
 
+function resolveStorageProxyBaseCandidates(): string[] {
+  const candidates = new Set<string>()
+
+  if (typeof window !== 'undefined') {
+    candidates.add(window.location.href)
+  }
+
+  const envBaseUrl = import.meta.env.VITE_STORAGE_PROXY_BASE_URL?.trim()
+  if (envBaseUrl) {
+    candidates.add(envBaseUrl)
+  }
+
+  const apiBaseUrl = useStore.getState().settings.baseUrl?.trim()
+  if (apiBaseUrl) {
+    candidates.add(apiBaseUrl)
+  }
+
+  return Array.from(candidates)
+}
+
+function resolveStorageProxySaveUrls(): string[] {
+  return resolveStorageProxyBaseCandidates()
+    .map((baseUrl) => {
+      try {
+        return new URL('api/storage/save', baseUrl).toString()
+      } catch {
+        return ''
+      }
+    })
+    .filter(Boolean)
+}
+
 async function fetchImageBlobWithProxyFallback(src: string): Promise<Blob> {
   try {
     const response = await fetch(src, { cache: 'no-store' })
@@ -199,39 +231,61 @@ async function fetchImageBlobWithProxyFallback(src: string): Promise<Blob> {
       throw directError
     }
 
-    const proxyResponse = await fetch('/api/storage/save', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        kind: 'url',
-        url: resolvedUrl.toString(),
-      }),
-    })
+    const proxySaveUrls = resolveStorageProxySaveUrls()
+    let lastDetail = 'HTTP 404'
+    let missingProxyRoute = false
 
-    if (!proxyResponse.ok) {
-      let detail = `HTTP ${proxyResponse.status}`
+    for (const proxySaveUrl of proxySaveUrls) {
       try {
-        const payload = await proxyResponse.json() as { error?: string }
-        if (payload?.error) detail = payload.error
-      } catch {
-        /* ignore */
+        const proxyResponse = await fetch(proxySaveUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            kind: 'url',
+            url: resolvedUrl.toString(),
+          }),
+        })
+
+        if (!proxyResponse.ok) {
+          let detail = `HTTP ${proxyResponse.status}`
+          try {
+            const payload = await proxyResponse.json() as { error?: string }
+            if (payload?.error) detail = payload.error
+          } catch {
+            /* ignore */
+          }
+          lastDetail = detail
+          if (proxyResponse.status === 404) {
+            missingProxyRoute = true
+          }
+          continue
+        }
+
+        const proxyPayload = await proxyResponse.json() as { url?: string }
+        if (!proxyPayload.url) {
+          lastDetail = 'proxy did not return an image URL'
+          continue
+        }
+
+        const storedResponse = await fetch(new URL(proxyPayload.url, proxySaveUrl).toString(), { cache: 'no-store' })
+        if (!storedResponse.ok) {
+          lastDetail = `proxy image read failed: HTTP ${storedResponse.status}`
+          continue
+        }
+
+        return await storedResponse.blob()
+      } catch (proxyError) {
+        lastDetail = proxyError instanceof Error ? proxyError.message : String(proxyError)
       }
-      throw new Error(`本地代理抓取失败: ${detail}`)
     }
 
-    const proxyPayload = await proxyResponse.json() as { url?: string }
-    if (!proxyPayload.url) {
-      throw new Error('本地代理未返回图片地址')
+    if (missingProxyRoute) {
+      throw new Error(`本地代理抓取失败: ${lastDetail}（当前部署未提供 /api/storage/save 代理接口）`)
     }
 
-    const storedResponse = await fetch(proxyPayload.url, { cache: 'no-store' })
-    if (!storedResponse.ok) {
-      throw new Error(`代理图片读取失败: HTTP ${storedResponse.status}`)
-    }
-
-    return await storedResponse.blob()
+    throw new Error(`本地代理抓取失败: ${lastDetail}`)
   }
 }
 
@@ -759,6 +813,7 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   let orderedInputImages = inputImages
   let maskImageId: string | null = null
   let maskTargetImageId: string | null = null
+  const persistedInputImageIds: string[] = []
 
   if (maskDraft) {
     try {
@@ -789,7 +844,12 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
 
   // 持久化输入图片到 IndexedDB（此前只在内存缓存中）
   for (const img of orderedInputImages) {
-    await storeImage(img.dataUrl)
+    persistedInputImageIds.push(await storeImage(img.dataUrl))
+  }
+
+  if (maskTargetImageId) {
+    const maskTargetIndex = orderedInputImages.findIndex((img) => img.id === maskTargetImageId)
+    maskTargetImageId = maskTargetIndex >= 0 ? persistedInputImageIds[maskTargetIndex] ?? null : null
   }
 
   const normalizedParams = normalizeParamsForSettings(params, settings)
@@ -810,7 +870,7 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     id: taskId,
     prompt: prompt.trim(),
     params: normalizedParams,
-    inputImageIds: orderedInputImages.map((i) => i.id),
+    inputImageIds: persistedInputImageIds,
     maskTargetImageId,
     maskImageId,
     outputImages: [],

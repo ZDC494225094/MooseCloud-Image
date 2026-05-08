@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TaskRecord, StoredImage } from './types'
-import { DEFAULT_PARAMS } from './types'
+import { DEFAULT_PARAMS, DEFAULT_SETTINGS } from './types'
 
-const { callImageApiMock } = vi.hoisted(() => ({
+const { callImageApiMock, putTaskMock } = vi.hoisted(() => ({
   callImageApiMock: vi.fn(),
+  putTaskMock: vi.fn(async () => 'ok'),
 }))
 
 let mockTasks: TaskRecord[] = []
@@ -16,7 +17,7 @@ vi.mock('./lib/api', () => ({
 
 vi.mock('./lib/db', () => ({
   getAllTasks: vi.fn(async () => mockTasks),
-  putTask: vi.fn(async () => 'ok'),
+  putTask: putTaskMock,
   deleteTask: vi.fn(async () => undefined),
   clearTasks: vi.fn(async () => undefined),
   getImage: vi.fn(async (id: string) => mockImages.find((image) => image.id === id)),
@@ -57,8 +58,33 @@ describe('initStore resume behavior', () => {
     mockImages = []
     storedImageCounter = 0
     callImageApiMock.mockReset()
+    putTaskMock.mockClear()
     callImageApiMock.mockImplementation(() => new Promise(() => undefined))
     vi.resetModules()
+  })
+
+  it('persists stored input image ids when creating a task', async () => {
+    const { submitTask, useStore } = await import('./store')
+
+    useStore.setState({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: 'prompt',
+      inputImages: [{ id: 'temporary-input-id', dataUrl: 'data:image/png;base64,a' }],
+      maskDraft: null,
+      params: { ...DEFAULT_PARAMS, n: 1 },
+      tasks: [],
+      showToast: vi.fn(),
+      setConfirmDialog: vi.fn(),
+    })
+
+    await submitTask()
+
+    expect(useStore.getState().tasks[0]?.inputImageIds).toEqual(['stored-image-1'])
+    expect(putTaskMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputImageIds: ['stored-image-1'],
+      }),
+    )
   })
 
   it('marks running tasks as interrupted on cold start', async () => {
