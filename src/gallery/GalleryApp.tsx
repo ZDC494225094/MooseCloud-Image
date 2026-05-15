@@ -11,30 +11,41 @@ interface PromptVariant {
   text: string
 }
 
-interface GalleryCase {
+interface GalleryCaseSummary {
   id: string
   title: string
   category: string
   sourceType: string
   sourceLabel: string
-  sourceItemUrl: string
-  externalSourceUrl: string
   sourceName: string
-  authorHandle: string
-  authorUrl: string
   model: string
   tags: string[]
-  imagePaths: string[]
   coverImage: string
+  prompt: string
+  promptLength: number
+  promptCount: number
+  hasPrompt: boolean
+  imageCount: number
+  caseNumber: number | null
+  sortValue: number
+  detailChunk: number
+}
+
+interface GalleryCaseDetail {
+  id: string
+  sourceItemUrl: string
+  externalSourceUrl: string
+  authorHandle: string
+  authorUrl: string
+  imagePaths?: string[]
   images: string[]
   prompt: string
   prompts: PromptVariant[]
-  promptLength: number
-  caseNumber: number | null
-  sortValue: number
   createdAt: string
   updatedAt: string
 }
+
+type GalleryCase = GalleryCaseSummary & GalleryCaseDetail
 
 interface GallerySource {
   id: string
@@ -47,11 +58,14 @@ interface GalleryPayload {
   syncedAt: string
   totalCases: number
   categories: string[]
-  cases: GalleryCase[]
+  cases: GalleryCaseSummary[]
   sources?: GallerySource[]
   sourceRepo?: string
   sourceReadme?: string
 }
+
+type GalleryPromptSearchMap = Record<string, string>
+type GalleryDetailChunkMap = Record<string, GalleryCaseDetail>
 
 type SortMode = 'latest' | 'oldest' | 'title' | 'promptLength'
 
@@ -68,8 +82,11 @@ interface GalleryViewState {
 
 const INITIAL_VISIBLE_CASES = 24
 const LOAD_MORE_BATCH_SIZE = 18
-const GALLERY_DATA_CACHE_NAME = `gpt-image-playground:gallery-data:${__APP_VERSION__}`
-const GALLERY_DATA_CACHE_REQUEST = './data/cases.json'
+const GALLERY_DATA_CACHE_NAME = `gpt-image-playground:gallery-index:${__APP_VERSION__}`
+const GALLERY_DATA_CACHE_REQUEST = './data/cases.index.json'
+const GALLERY_PROMPT_SEARCH_CACHE_NAME = `gpt-image-playground:gallery-search:${__APP_VERSION__}`
+const GALLERY_PROMPT_SEARCH_CACHE_REQUEST = './data/cases.search.json'
+const GALLERY_DETAIL_CHUNK_CACHE_NAME = `gpt-image-playground:gallery-details:${__APP_VERSION__}`
 const GALLERY_VIEW_STATE_KEY = 'gpt-image-playground:gallery-view-state'
 const NAV_BUTTON_CLASS_NAME =
   'rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
@@ -79,6 +96,9 @@ const INACTIVE_FAVORITE_BUTTON_CLASS_NAME =
   'border-gray-200 bg-white text-gray-400 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:bg-white/[0.06]'
 
 let galleryPayloadMemoryCache: GalleryPayload | null = null
+let galleryPromptSearchMemoryCache: GalleryPromptSearchMap | null = null
+const galleryDetailChunkMemoryCache = new Map<number, GalleryDetailChunkMap>()
+const galleryDetailChunkPromiseCache = new Map<number, Promise<GalleryDetailChunkMap>>()
 
 const CATEGORY_LABELS: Record<string, string> = {
   'Ad Creative Cases': '广告创意案例',
@@ -257,6 +277,10 @@ function normalizeCase(item: Record<string, unknown>, index: number) {
       : typeof item.caseNumber === 'number'
         ? item.caseNumber
         : Number.MAX_SAFE_INTEGER - index
+  const coverImage =
+    typeof item.coverImage === 'string' && item.coverImage.trim()
+      ? item.coverImage
+      : images[0] || ''
 
   return {
     id: typeof item.id === 'string' ? item.id : `case-${index + 1}`,
@@ -293,10 +317,7 @@ function normalizeCase(item: Record<string, unknown>, index: number) {
       ? item.tags.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       : [],
     imagePaths,
-    coverImage:
-      typeof item.coverImage === 'string' && item.coverImage.trim()
-        ? item.coverImage
-        : images[0] || '',
+    coverImage,
     images,
     prompt: primaryPrompt,
     prompts,
@@ -304,16 +325,69 @@ function normalizeCase(item: Record<string, unknown>, index: number) {
       typeof item.promptLength === 'number' && Number.isFinite(item.promptLength)
         ? item.promptLength
         : primaryPrompt.length,
+    promptCount: prompts.length > 0 ? prompts.length : primaryPrompt ? 1 : 0,
+    hasPrompt: Boolean(primaryPrompt),
+    imageCount: Math.max(images.length, coverImage ? 1 : 0),
     caseNumber: typeof item.caseNumber === 'number' ? item.caseNumber : null,
     sortValue: parsedSortValue,
+    detailChunk: 0,
     createdAt,
     updatedAt,
   } satisfies GalleryCase
 }
 
+function normalizeGalleryCaseSummary(item: Record<string, unknown>, index: number) {
+  const normalizedCase = normalizeCase(item, index)
+
+  return {
+    id: normalizedCase.id,
+    title: normalizedCase.title,
+    category: normalizedCase.category,
+    sourceType: normalizedCase.sourceType,
+    sourceLabel: normalizedCase.sourceLabel,
+    sourceName: normalizedCase.sourceName,
+    model: normalizedCase.model,
+    tags: normalizedCase.tags,
+    coverImage: normalizedCase.coverImage,
+    prompt: normalizedCase.prompt,
+    promptLength: normalizedCase.promptLength,
+    promptCount: normalizedCase.promptCount,
+    hasPrompt: normalizedCase.hasPrompt,
+    imageCount: normalizedCase.imageCount,
+    caseNumber: normalizedCase.caseNumber,
+    sortValue: normalizedCase.sortValue,
+    detailChunk:
+      typeof item.detailChunk === 'number' && Number.isFinite(item.detailChunk)
+        ? Math.max(0, Math.trunc(item.detailChunk))
+        : 0,
+  } satisfies GalleryCaseSummary
+}
+
+function normalizeGalleryCaseDetail(
+  item: Record<string, unknown>,
+  fallbackSummary?: GalleryCaseSummary | null,
+) {
+  const normalizedCase = normalizeCase(item, 0)
+
+  return {
+    id: normalizedCase.id || fallbackSummary?.id || '',
+    sourceItemUrl: normalizedCase.sourceItemUrl,
+    externalSourceUrl: normalizedCase.externalSourceUrl,
+    authorHandle: normalizedCase.authorHandle,
+    authorUrl: normalizedCase.authorUrl,
+    images: normalizedCase.images,
+    prompt: normalizedCase.prompt || fallbackSummary?.prompt || '',
+    prompts: normalizedCase.prompts,
+    createdAt: normalizedCase.createdAt,
+    updatedAt: normalizedCase.updatedAt,
+  } satisfies GalleryCaseDetail
+}
+
 function normalizePayload(input: GalleryPayload) {
   const cases = Array.isArray(input.cases)
-    ? input.cases.map((item, index) => normalizeCase(item as unknown as Record<string, unknown>, index))
+    ? input.cases.map((item, index) =>
+        normalizeGalleryCaseSummary(item as unknown as Record<string, unknown>, index),
+      )
     : []
 
   return {
@@ -327,6 +401,54 @@ function normalizePayload(input: GalleryPayload) {
     sourceRepo: input.sourceRepo,
     sourceReadme: input.sourceReadme,
   } satisfies GalleryPayload
+}
+
+function normalizePromptSearchMap(input: unknown) {
+  if (!input || typeof input !== 'object') return null
+
+  const rawCases = (input as { cases?: unknown }).cases
+  if (!rawCases || typeof rawCases !== 'object') return null
+
+  const entries = Object.entries(rawCases as Record<string, unknown>)
+    .filter(([, value]) => typeof value === 'string' && value.trim().length > 0)
+    .map(([caseId, value]) => [caseId, (value as string).toLowerCase()] as const)
+
+  return Object.fromEntries(entries) satisfies GalleryPromptSearchMap
+}
+
+function normalizeDetailChunkPayload(input: unknown, chunkIndex: number) {
+  if (!input || typeof input !== 'object') return {} satisfies GalleryDetailChunkMap
+
+  const rawCases = (input as { cases?: unknown }).cases
+  if (!rawCases || typeof rawCases !== 'object') return {} satisfies GalleryDetailChunkMap
+
+  return Object.fromEntries(
+    Object.entries(rawCases as Record<string, unknown>).map(([caseId, value]) => [
+      caseId,
+      normalizeGalleryCaseDetail(
+        value as Record<string, unknown>,
+        {
+          id: caseId,
+          title: '',
+          category: '',
+          sourceType: 'github',
+          sourceLabel: '',
+          sourceName: '',
+          model: '',
+          tags: [],
+          coverImage: '',
+          prompt: '',
+          promptLength: 0,
+          promptCount: 0,
+          hasPrompt: false,
+          imageCount: 0,
+          caseNumber: null,
+          sortValue: 0,
+          detailChunk: chunkIndex,
+        },
+      ),
+    ]),
+  ) satisfies GalleryDetailChunkMap
 }
 
 async function readCachedGalleryPayload() {
@@ -366,6 +488,105 @@ async function fetchLatestGalleryPayload() {
   return payload
 }
 
+function getGalleryDetailChunkRequest(chunkIndex: number) {
+  return `./data/case-details/chunk-${String(chunkIndex).padStart(3, '0')}.json`
+}
+
+async function readCachedGalleryPromptSearchMap() {
+  if (galleryPromptSearchMemoryCache) return galleryPromptSearchMemoryCache
+  if (typeof window === 'undefined' || !('caches' in window)) return null
+
+  try {
+    const cache = await window.caches.open(GALLERY_PROMPT_SEARCH_CACHE_NAME)
+    const response = await cache.match(GALLERY_PROMPT_SEARCH_CACHE_REQUEST)
+    if (!response?.ok) return null
+
+    const promptSearchMap = normalizePromptSearchMap(await response.json())
+    if (!promptSearchMap) return null
+
+    galleryPromptSearchMemoryCache = promptSearchMap
+    return promptSearchMap
+  } catch {
+    return null
+  }
+}
+
+async function fetchLatestGalleryPromptSearchMap() {
+  const response = await fetch(GALLERY_PROMPT_SEARCH_CACHE_REQUEST, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+  const cacheableResponse = response.clone()
+  const promptSearchMap = normalizePromptSearchMap(await response.json())
+  if (!promptSearchMap) throw new Error('Invalid prompt search payload')
+
+  galleryPromptSearchMemoryCache = promptSearchMap
+
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(GALLERY_PROMPT_SEARCH_CACHE_NAME)
+      await cache.put(GALLERY_PROMPT_SEARCH_CACHE_REQUEST, cacheableResponse)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return promptSearchMap
+}
+
+async function fetchGalleryDetailChunk(chunkIndex: number) {
+  const cachedChunk = galleryDetailChunkMemoryCache.get(chunkIndex)
+  if (cachedChunk) return cachedChunk
+
+  const existingPromise = galleryDetailChunkPromiseCache.get(chunkIndex)
+  if (existingPromise) return existingPromise
+
+  const request = getGalleryDetailChunkRequest(chunkIndex)
+  const chunkPromise = (async () => {
+    let cachedResponse: Response | null = null
+
+    if (typeof window !== 'undefined' && 'caches' in window) {
+      try {
+        const cache = await window.caches.open(GALLERY_DETAIL_CHUNK_CACHE_NAME)
+        cachedResponse = (await cache.match(request)) ?? null
+      } catch {
+        cachedResponse = null
+      }
+    }
+
+    if (cachedResponse?.ok) {
+      const cachedChunkMap = normalizeDetailChunkPayload(await cachedResponse.json(), chunkIndex)
+      galleryDetailChunkMemoryCache.set(chunkIndex, cachedChunkMap)
+      return cachedChunkMap
+    }
+
+    const response = await fetch(request, { cache: 'no-store' })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+    const cacheableResponse = response.clone()
+    const chunkMap = normalizeDetailChunkPayload(await response.json(), chunkIndex)
+    galleryDetailChunkMemoryCache.set(chunkIndex, chunkMap)
+
+    if (typeof window !== 'undefined' && 'caches' in window) {
+      try {
+        const cache = await window.caches.open(GALLERY_DETAIL_CHUNK_CACHE_NAME)
+        await cache.put(request, cacheableResponse)
+      } catch {
+        /* ignore */
+      }
+    }
+
+    return chunkMap
+  })()
+
+  galleryDetailChunkPromiseCache.set(chunkIndex, chunkPromise)
+
+  try {
+    return await chunkPromise
+  } finally {
+    galleryDetailChunkPromiseCache.delete(chunkIndex)
+  }
+}
+
 async function copyToClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -393,12 +614,18 @@ function DetailMeta({
 }
 
 function GalleryCaseModal({
-  item,
+  summary,
+  detail,
+  loadingDetail,
+  detailError,
   onClose,
   isFavorite,
   onToggleFavorite,
 }: {
-  item: GalleryCase | null
+  summary: GalleryCaseSummary | null
+  detail: GalleryCaseDetail | null
+  loadingDetail: boolean
+  detailError: string
   onClose: () => void
   isFavorite: boolean
   onToggleFavorite: (caseId: string) => void
@@ -407,14 +634,14 @@ function GalleryCaseModal({
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [copiedPromptIndex, setCopiedPromptIndex] = useState<number | null>(null)
   const [promptExpanded, setPromptExpanded] = useState(false)
-  useCloseOnEscape(Boolean(item), onClose)
+  useCloseOnEscape(Boolean(summary), onClose)
 
   useEffect(() => {
     setImageIndex(0)
     setLightboxIndex(null)
     setCopiedPromptIndex(null)
     setPromptExpanded(false)
-  }, [item])
+  }, [summary])
 
   useEffect(() => {
     if (copiedPromptIndex === null) return undefined
@@ -423,10 +650,36 @@ function GalleryCaseModal({
     return () => window.clearTimeout(timer)
   }, [copiedPromptIndex])
 
-  if (!item) return null
+  if (!summary) return null
 
-  const currentImage = item.images[imageIndex] || item.coverImage
-  const canNavigate = item.images.length > 1
+  const images = detail?.images.length ? detail.images : [summary.coverImage].filter(Boolean)
+  const prompts = detail?.prompts.length
+    ? detail.prompts
+    : summary.prompt
+      ? [
+          {
+            type: 'default',
+            label: 'Prompt',
+            text: summary.prompt,
+          },
+        ]
+      : []
+  const promptCount = detail?.prompts.length ?? summary.promptCount
+  const primaryPrompt = detail?.prompt || summary.prompt
+  const currentImage = images[imageIndex] || summary.coverImage
+  const canNavigate = images.length > 1
+  const item = {
+    ...summary,
+    sourceItemUrl: detail?.sourceItemUrl || '',
+    externalSourceUrl: detail?.externalSourceUrl || '',
+    authorHandle: detail?.authorHandle || '',
+    authorUrl: detail?.authorUrl || '',
+    images,
+    prompt: primaryPrompt,
+    prompts,
+    createdAt: detail?.createdAt || '',
+    updatedAt: detail?.updatedAt || '',
+  } satisfies GalleryCase
   return (
     <>
       <div
@@ -441,14 +694,14 @@ function GalleryCaseModal({
             <div className="min-w-0 flex-1">
               <h2
                 className="truncate text-base font-bold tracking-tight text-gray-900 dark:text-gray-100 sm:text-2xl"
-                title={item.title}
+                title={summary.title}
               >
-                {item.title}
+                {summary.title}
               </h2>
             </div>
             <div className="flex shrink-0 items-center gap-2 self-start">
               <button
-                onClick={() => onToggleFavorite(item.id)}
+                onClick={() => onToggleFavorite(summary.id)}
                 className={`inline-flex h-10 w-10 items-center justify-center rounded-xl border transition-colors sm:h-auto sm:w-auto sm:px-3 sm:py-2 sm:text-sm ${
                   isFavorite
                     ? ACTIVE_FAVORITE_BUTTON_CLASS_NAME
@@ -465,7 +718,7 @@ function GalleryCaseModal({
                 </span>
               </button>
               <a
-                href={buildPlaygroundHref(item.prompt, currentImage)}
+                href={buildPlaygroundHref(primaryPrompt, currentImage)}
                 className="inline-flex h-10 items-center justify-center rounded-xl bg-blue-600 px-3 text-sm font-medium text-white transition-colors hover:bg-blue-500 sm:py-2"
               >
                 <span className="sm:hidden">创作</span>
@@ -490,7 +743,7 @@ function GalleryCaseModal({
                 <div className="relative flex min-h-[280px] items-center justify-center bg-gray-100 p-3 dark:bg-black/25 sm:min-h-[420px] xl:min-h-[520px]">
                   {canNavigate && (
                     <button
-                      onClick={() => setImageIndex((value) => (value - 1 + item.images.length) % item.images.length)}
+                      onClick={() => setImageIndex((value) => (value - 1 + images.length) % images.length)}
                       className="absolute left-3 top-1/2 z-10 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/20 bg-black/45 text-white transition-colors hover:bg-black/60 sm:flex"
                     >
                       ‹
@@ -505,7 +758,7 @@ function GalleryCaseModal({
                     {currentImage ? (
                       <img
                         src={currentImage}
-                        alt={`${item.title} ${imageIndex + 1}`}
+                        alt={`${summary.title} ${imageIndex + 1}`}
                         className="max-h-full max-w-full object-contain"
                       />
                     ) : (
@@ -517,7 +770,7 @@ function GalleryCaseModal({
 
                   {canNavigate && (
                     <button
-                      onClick={() => setImageIndex((value) => (value + 1) % item.images.length)}
+                      onClick={() => setImageIndex((value) => (value + 1) % images.length)}
                       className="absolute right-3 top-1/2 z-10 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/20 bg-black/45 text-white transition-colors hover:bg-black/60 sm:flex"
                     >
                       ›
@@ -527,9 +780,9 @@ function GalleryCaseModal({
 
                 {canNavigate && (
                   <div className="flex gap-2 overflow-x-auto px-3 pb-3 hide-scrollbar">
-                    {item.images.map((image, index) => (
+                    {images.map((image, index) => (
                       <button
-                        key={`${item.id}-${index}`}
+                        key={`${summary.id}-${index}`}
                         onClick={() => setImageIndex(index)}
                         className={`overflow-hidden rounded-2xl border ${
                           index === imageIndex
@@ -546,8 +799,8 @@ function GalleryCaseModal({
 
               <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-white/[0.08] dark:bg-gray-900">
                 <div className="flex flex-wrap items-center gap-2">
-                  {item.tags.length > 0 ? (
-                    item.tags.map((tag) => (
+                  {summary.tags.length > 0 ? (
+                    summary.tags.map((tag) => (
                       <span
                         key={tag}
                         className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-600 dark:bg-blue-500/10 dark:text-blue-400"
@@ -572,7 +825,7 @@ function GalleryCaseModal({
                     </p>
                   </div>
                   <a
-                    href={buildPlaygroundHref(item.prompt, currentImage)}
+                    href={buildPlaygroundHref(primaryPrompt, currentImage)}
                     className="rounded-xl border border-gray-200 px-3 py-2 text-xs transition-colors hover:bg-gray-50 dark:border-white/[0.08] dark:hover:bg-white/[0.06]"
                   >
                     使用主提示词
@@ -587,7 +840,7 @@ function GalleryCaseModal({
                   >
                     <div>
                       <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
-                        {item.prompts.length > 0 ? `共 ${item.prompts.length} 段提示词` : '暂无提示词'}
+                        {promptCount > 0 ? `共 ${promptCount} 段提示词` : '暂无提示词'}
                       </p>
                       <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                         {promptExpanded ? '收起提示词内容' : '展开查看完整提示词'}
@@ -600,10 +853,18 @@ function GalleryCaseModal({
 
                   {promptExpanded && (
                     <div className="mt-4 space-y-4">
-                      {item.prompts.length > 0 ? (
-                        item.prompts.map((promptItem, index) => (
+                      {loadingDetail && prompts.length === 0 ? (
+                        <div className="rounded-2xl border border-dashed border-gray-200 px-4 py-8 text-center text-sm text-gray-400 dark:border-white/[0.08] dark:text-gray-500">
+                          正在加载完整提示词...
+                        </div>
+                      ) : detailError && prompts.length === 0 ? (
+                        <div className="rounded-2xl border border-dashed border-red-200 px-4 py-8 text-center text-sm text-red-500 dark:border-red-500/20">
+                          完整提示词加载失败: {detailError}
+                        </div>
+                      ) : prompts.length > 0 ? (
+                        prompts.map((promptItem, index) => (
                           <div
-                            key={`${item.id}-prompt-${index}`}
+                            key={`${summary.id}-prompt-${index}`}
                             className="overflow-hidden rounded-2xl border border-gray-200 bg-gray-50/85 dark:border-white/[0.08] dark:bg-black/20"
                           >
                             <div className="flex items-center justify-between gap-3 border-b border-gray-200 bg-white/70 px-4 py-3 dark:border-white/[0.08] dark:bg-white/[0.02]">
@@ -668,7 +929,14 @@ export default function GalleryApp() {
   const [sourceFilter, setSourceFilter] = useState(() => initialViewStateRef.current.sourceFilter)
   const [favoriteOnly, setFavoriteOnly] = useState(() => initialViewStateRef.current.favoriteOnly)
   const [sortMode, setSortMode] = useState<SortMode>(() => initialViewStateRef.current.sortMode)
-  const [activeCase, setActiveCase] = useState<GalleryCase | null>(null)
+  const [activeCase, setActiveCase] = useState<GalleryCaseSummary | null>(null)
+  const [activeCaseDetail, setActiveCaseDetail] = useState<GalleryCaseDetail | null>(null)
+  const [activeCaseDetailLoading, setActiveCaseDetailLoading] = useState(false)
+  const [activeCaseDetailError, setActiveCaseDetailError] = useState('')
+  const [promptSearchMap, setPromptSearchMap] = useState<GalleryPromptSearchMap | null>(
+    () => galleryPromptSearchMemoryCache,
+  )
+  const [promptSearchLoading, setPromptSearchLoading] = useState(false)
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => getStoredGalleryFavoriteIds())
   const [batchStart, setBatchStart] = useState(() => initialViewStateRef.current.batchStart)
   const [visibleCount, setVisibleCount] = useState(() => initialViewStateRef.current.visibleCount)
@@ -732,6 +1000,76 @@ export default function GalleryApp() {
       alive = false
     }
   }, [])
+
+  useEffect(() => {
+    const normalizedQuery = query.trim()
+    if (!normalizedQuery || promptSearchMap || promptSearchLoading) return
+
+    let alive = true
+
+    const loadPromptSearch = async () => {
+      setPromptSearchLoading(true)
+
+      try {
+        const cachedPromptSearch = await readCachedGalleryPromptSearchMap()
+        if (alive && cachedPromptSearch) {
+          setPromptSearchMap(cachedPromptSearch)
+        }
+
+        const latestPromptSearch = await fetchLatestGalleryPromptSearchMap()
+        if (!alive) return
+
+        setPromptSearchMap(latestPromptSearch)
+      } catch {
+        /* ignore prompt-search failures and keep metadata search available */
+      } finally {
+        if (alive) setPromptSearchLoading(false)
+      }
+    }
+
+    void loadPromptSearch()
+
+    return () => {
+      alive = false
+    }
+  }, [promptSearchLoading, promptSearchMap, query])
+
+  useEffect(() => {
+    if (!activeCase) {
+      setActiveCaseDetail(null)
+      setActiveCaseDetailLoading(false)
+      setActiveCaseDetailError('')
+      return
+    }
+
+    let alive = true
+
+    const loadCaseDetail = async () => {
+      setActiveCaseDetail(null)
+      setActiveCaseDetailLoading(true)
+      setActiveCaseDetailError('')
+
+      try {
+        const chunkMap = await fetchGalleryDetailChunk(activeCase.detailChunk)
+        if (!alive) return
+
+        setActiveCaseDetail(chunkMap[activeCase.id] || null)
+      } catch (err) {
+        if (!alive) return
+
+        setActiveCaseDetail(null)
+        setActiveCaseDetailError(err instanceof Error ? err.message : String(err))
+      } finally {
+        if (alive) setActiveCaseDetailLoading(false)
+      }
+    }
+
+    void loadCaseDetail()
+
+    return () => {
+      alive = false
+    }
+  }, [activeCase])
 
   useEffect(() => {
     const handleScroll = () => {
@@ -825,13 +1163,15 @@ export default function GalleryApp() {
         item.sourceName,
         item.model,
         item.prompt,
-        ...item.prompts.map((entry) => entry.text),
         ...item.tags,
       ]
         .join(' ')
         .toLowerCase()
 
-      return haystack.includes(normalizedQuery)
+      if (haystack.includes(normalizedQuery)) return true
+
+      const promptSearchText = promptSearchMap?.[item.id]
+      return typeof promptSearchText === 'string' ? promptSearchText.includes(normalizedQuery) : false
     })
 
     switch (sortMode) {
@@ -845,7 +1185,7 @@ export default function GalleryApp() {
       default:
         return [...list].sort((left, right) => right.sortValue - left.sortValue)
     }
-  }, [payload, query, category, sourceFilter, favoriteOnly, favoriteIdSet, sortMode])
+  }, [payload, query, category, sourceFilter, favoriteOnly, favoriteIdSet, promptSearchMap, sortMode])
 
   useEffect(() => {
     if (!didMountFilterResetRef.current) {
@@ -924,7 +1264,7 @@ export default function GalleryApp() {
   }, [filteredCases.length, hasMoreCases, visibleCases.length])
 
   const visibleCaseColumns = useMemo(() => {
-    const columns = Array.from({ length: columnCount }, () => [] as GalleryCase[])
+    const columns = Array.from({ length: columnCount }, () => [] as GalleryCaseSummary[])
 
     visibleCases.forEach((item, index) => {
       columns[index % columnCount].push(item)
@@ -933,14 +1273,18 @@ export default function GalleryApp() {
     return columns
   }, [columnCount, visibleCases])
 
-  const renderCaseCard = (item: GalleryCase) => {
-    const previewImage = item.coverImage || item.images[0]
+  const renderCaseCard = (item: GalleryCaseSummary) => {
+    const previewImage = item.coverImage
     const isFavorite = favoriteIdSet.has(item.id)
 
     return (
       <article key={item.id} className="relative">
         <button
-          onClick={() => setActiveCase(item)}
+          onClick={() => {
+            setActiveCaseDetail(null)
+            setActiveCaseDetailError('')
+            setActiveCase(item)
+          }}
           className="group block w-full overflow-hidden rounded-3xl border border-gray-200 bg-white text-left shadow-sm transition-[transform,box-shadow,border-color] hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-white/[0.08] dark:bg-gray-900 dark:hover:border-white/[0.18]"
           title={item.title}
           aria-label={`鏌ョ湅 ${item.title} 璇︽儏`}
@@ -1000,7 +1344,7 @@ export default function GalleryApp() {
   const statItems = useMemo(() => {
     if (!payload) return []
 
-    const imageCount = payload.cases.reduce((sum, item) => sum + Math.max(item.images.length, 1), 0)
+    const imageCount = payload.cases.reduce((sum, item) => sum + Math.max(item.imageCount, 1), 0)
     const sourceCount = unique(payload.cases.map((item) => item.sourceLabel)).length
 
     return [
@@ -1009,7 +1353,7 @@ export default function GalleryApp() {
       { label: '来源数量', value: sourceCount },
       {
         label: '含提示词案例',
-        value: payload.cases.filter((item) => item.prompts.length > 0 || item.prompt.trim()).length,
+        value: payload.cases.filter((item) => item.hasPrompt).length,
       },
     ]
   }, [payload])
@@ -1217,8 +1561,16 @@ export default function GalleryApp() {
       </main>
 
       <GalleryCaseModal
-        item={activeCase}
-        onClose={() => setActiveCase(null)}
+        summary={activeCase}
+        detail={activeCaseDetail}
+        loadingDetail={activeCaseDetailLoading}
+        detailError={activeCaseDetailError}
+        onClose={() => {
+          setActiveCase(null)
+          setActiveCaseDetail(null)
+          setActiveCaseDetailLoading(false)
+          setActiveCaseDetailError('')
+        }}
         isFavorite={activeCase ? favoriteIdSet.has(activeCase.id) : false}
         onToggleFavorite={toggleFavorite}
       />

@@ -14,7 +14,7 @@ MooseCloud Image Playground 是一个面向图片生成场景的前端工作台�
 - API URL / API Key 配置
 - `images` / `responses` 两种接口模式切换
 - 画廊案例浏览、搜索、分类和排序
-- 从公开来源同步案例数据到本地 `public/data/cases.json`
+- 从公开来源同步案例数据到本地 `public/data/cases.index.json`、`public/data/cases.search.json` 与 `public/data/case-details/`
 - 构建后使用内置 Node 服务启动静态站点
 
 ## 技术栈
@@ -108,16 +108,18 @@ npm run test:watch    # 测试监听
 
 ## 画廊数据同步
 
-画廊数据由脚本 [`scripts/sync-gallery-data.mjs`](/F:/code/AICode/gpt-image-2-prompt/scripts/sync-gallery-data.mjs) 生成，并输出到 [`public/data/cases.json`](/F:/code/AICode/gpt-image-2-prompt/public/data/cases.json)。
+画廊数据由脚本 [`scripts/sync-gallery-data.mjs`](/F:/code/AICode/gpt-image-2-prompt/scripts/sync-gallery-data.mjs) 生成，并输出到 [`public/data/cases.index.json`](/F:/code/AICode/gpt-image-2-prompt/public/data/cases.index.json)、[`public/data/cases.search.json`](/F:/code/AICode/gpt-image-2-prompt/public/data/cases.search.json) 和 [`public/data/case-details/`](</F:/code/AICode/gpt-image-2-prompt/public/data/case-details>)。
 
 当前同步脚本会聚合公开来源数据，包括：
 
 - `awesome-gpt-image-2-prompts`
 - OpenNana prompt gallery
+- 默认只保留最新的 `1000` 条案例以控制前端加载体积
 
 可选环境变量：
 
 ```bash
+MAX_GALLERY_CASES=1000
 OPENNANA_MAX_ITEMS=200
 OPENNANA_CONCURRENCY=8
 ```

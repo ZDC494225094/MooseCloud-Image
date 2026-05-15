@@ -1,4 +1,4 @@
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -15,7 +15,8 @@ const GITHUB_IMAGE_BASE_URL =
 const OPENNANA_SITE_URL = 'https://opennana.com/awesome-prompt-gallery?media_type=image'
 const OPENNANA_API_BASE_URL = 'https://api.opennana.com/api'
 const OPENNANA_PAGE_SIZE = 100
-const OPENNANA_MAX_ITEMS = readPositiveIntEnv('OPENNANA_MAX_ITEMS', Number.POSITIVE_INFINITY)
+const MAX_GALLERY_CASES = readPositiveIntEnv('MAX_GALLERY_CASES', 1000)
+const OPENNANA_MAX_ITEMS = readPositiveIntEnv('OPENNANA_MAX_ITEMS', MAX_GALLERY_CASES)
 const OPENNANA_DETAIL_ITEMS = readPositiveIntEnv('OPENNANA_DETAIL_ITEMS', 200)
 const OPENNANA_CONCURRENCY = readPositiveIntEnv('OPENNANA_CONCURRENCY', 8)
 
@@ -24,7 +25,11 @@ const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '..')
 const dataDir = path.join(projectRoot, 'public', 'data')
-const outputFile = path.join(dataDir, 'cases.json')
+const legacyOutputFile = path.join(dataDir, 'cases.json')
+const indexOutputFile = path.join(dataDir, 'cases.index.json')
+const searchOutputFile = path.join(dataDir, 'cases.search.json')
+const detailChunkDir = path.join(dataDir, 'case-details')
+const DETAIL_CHUNK_SIZE = 100
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))]
@@ -81,6 +86,14 @@ function normalizePromptVariants(prompts) {
       }
     })
     .filter(Boolean)
+}
+
+function buildPromptSearchText(prompt, promptVariants) {
+  return unique(
+    [normalizeUrl(prompt), ...normalizePromptVariants(promptVariants).map((entry) => normalizeUrl(entry.text))],
+  )
+    .join(' ')
+    .toLowerCase()
 }
 
 function pickPrimaryPrompt(promptVariants) {
@@ -409,6 +422,105 @@ function normalizeOpenNanaListCase(listItem) {
   }
 }
 
+function buildCaseSummary(item, detailChunk) {
+  const promptVariants = Array.isArray(item.prompts) ? item.prompts : []
+  const prompt = normalizeUrl(item.prompt) || pickPrimaryPrompt(promptVariants)
+  const images = Array.isArray(item.images) ? item.images.map(normalizeUrl).filter(Boolean) : []
+  const coverImage = normalizeUrl(item.coverImage) || images[0] || ''
+  const tags = Array.isArray(item.tags) ? item.tags.map(normalizeUrl).filter(Boolean) : []
+
+  return {
+    id: normalizeUrl(item.id),
+    title: normalizeUrl(item.title) || 'Untitled',
+    category: normalizeUrl(item.category) || normalizeUrl(item.sourceLabel) || 'Gallery',
+    sourceType: normalizeUrl(item.sourceType) || 'github',
+    sourceLabel: normalizeUrl(item.sourceLabel) || 'Gallery',
+    sourceName: normalizeUrl(item.sourceName),
+    model: normalizeUrl(item.model),
+    tags,
+    coverImage,
+    prompt,
+    promptLength: Number(item.promptLength) || prompt.length,
+    promptCount: promptVariants.length > 0 ? promptVariants.length : prompt ? 1 : 0,
+    hasPrompt: Boolean(prompt),
+    imageCount: Math.max(images.length, coverImage ? 1 : 0),
+    caseNumber: typeof item.caseNumber === 'number' ? item.caseNumber : null,
+    sortValue: Number(item.sortValue) || 0,
+    detailChunk,
+  }
+}
+
+function buildCaseDetail(item) {
+  const promptVariants = normalizePromptVariants(item.prompts)
+  const prompt = normalizeUrl(item.prompt) || pickPrimaryPrompt(promptVariants)
+  const images = Array.isArray(item.images) ? item.images.map(normalizeUrl).filter(Boolean) : []
+
+  return {
+    id: normalizeUrl(item.id),
+    sourceItemUrl: normalizeUrl(item.sourceItemUrl),
+    externalSourceUrl: normalizeUrl(item.externalSourceUrl),
+    authorHandle: normalizeUrl(item.authorHandle),
+    authorUrl: normalizeUrl(item.authorUrl),
+    images,
+    prompts: promptVariants,
+    prompt,
+    createdAt: normalizeUrl(item.createdAt),
+    updatedAt: normalizeUrl(item.updatedAt),
+  }
+}
+
+function buildGalleryArtifacts(cases) {
+  const detailChunks = new Map()
+  const indexCases = cases.map((item, index) => {
+    const detailChunk = Math.floor(index / DETAIL_CHUNK_SIZE)
+    const chunkCases = detailChunks.get(detailChunk) || {}
+    chunkCases[item.id] = buildCaseDetail(item)
+    detailChunks.set(detailChunk, chunkCases)
+    return buildCaseSummary(item, detailChunk)
+  })
+
+  const promptSearch = Object.fromEntries(
+    cases.map((item) => [normalizeUrl(item.id), buildPromptSearchText(item.prompt, item.prompts)]),
+  )
+
+  return {
+    indexCases,
+    promptSearch,
+    detailChunks,
+  }
+}
+
+async function writeGalleryArtifacts(payload) {
+  const { indexCases, promptSearch, detailChunks } = buildGalleryArtifacts(payload.cases)
+
+  await mkdir(dataDir, { recursive: true })
+  await rm(detailChunkDir, { recursive: true, force: true })
+  await mkdir(detailChunkDir, { recursive: true })
+
+  const indexPayload = {
+    sourceRepo: payload.sourceRepo,
+    sourceReadme: payload.sourceReadme,
+    syncedAt: payload.syncedAt,
+    totalCases: payload.totalCases,
+    categories: payload.categories,
+    sources: payload.sources,
+    cases: indexCases,
+  }
+
+  await Promise.all([
+    writeFile(legacyOutputFile, `${JSON.stringify(payload)}\n`, 'utf8'),
+    writeFile(indexOutputFile, `${JSON.stringify(indexPayload)}\n`, 'utf8'),
+    writeFile(searchOutputFile, `${JSON.stringify({ cases: promptSearch })}\n`, 'utf8'),
+    ...Array.from(detailChunks.entries()).map(([chunkIndex, chunkCases]) =>
+      writeFile(
+        path.join(detailChunkDir, `chunk-${String(chunkIndex).padStart(3, '0')}.json`),
+        `${JSON.stringify({ cases: chunkCases })}\n`,
+        'utf8',
+      ),
+    ),
+  ])
+}
+
 async function fetchOpenNanaCases() {
   const listItems = await fetchOpenNanaListItems()
   if (listItems.length === 0) return []
@@ -451,7 +563,8 @@ async function fetchOpenNanaCases() {
 async function main() {
   const githubCases = await fetchGithubCases()
   const opennanaCases = await fetchOpenNanaCases()
-  const cases = [...opennanaCases, ...githubCases].sort((left, right) => right.sortValue - left.sortValue)
+  const allCases = [...opennanaCases, ...githubCases].sort((left, right) => right.sortValue - left.sortValue)
+  const cases = allCases.slice(0, MAX_GALLERY_CASES)
   const categories = unique(cases.map((item) => item.category)).sort((left, right) =>
     left.localeCompare(right, 'zh-CN'),
   )
@@ -479,11 +592,11 @@ async function main() {
     cases,
   }
 
-  await mkdir(dataDir, { recursive: true })
-  await writeFile(outputFile, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+  await writeGalleryArtifacts(payload)
 
   console.log(`Synced ${githubCases.length} GitHub cases + ${opennanaCases.length} OpenNana cases`)
-  console.log(`Wrote ${cases.length} total cases to ${outputFile}`)
+  console.log(`Kept latest ${cases.length} of ${allCases.length} total cases`)
+  console.log(`Wrote ${cases.length} total cases to ${indexOutputFile}`)
 }
 
 main().catch((error) => {

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gpt-image-playground-v0.1.6'
+const CACHE_NAME = 'gpt-image-playground-v0.1.7'
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './pwa-icon.svg']
 
 self.addEventListener('install', (event) => {
@@ -38,7 +38,7 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  if (url.pathname.endsWith('/data/cases.json')) {
+  if (url.pathname.includes('/data/')) {
     event.respondWith(
       fetch(request)
         .then((response) => {
